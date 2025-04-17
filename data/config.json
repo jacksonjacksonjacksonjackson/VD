@@ -1,0 +1,22 @@
+{
+    "window_size": "1400x771",
+    "max_threads": 10,
+    "visible_columns": [
+        "VIN",
+        "Year",
+        "Make",
+        "Model",
+        "FuelTypePrimary",
+        "BodyClass",
+        "MPG Combined",
+        "CO2 emissions",
+        "Annual Mileage",
+        "Asset ID"
+    ],
+    "gas_price": 3.5,
+    "electricity_price": 0.13,
+    "ev_efficiency": 0.3,
+    "annual_mileage": 12000,
+    "export_format": "Excel",
+    "export_folder": "/Applications/VS Code/Production/Working Templates/VD2/data/exports"
+}

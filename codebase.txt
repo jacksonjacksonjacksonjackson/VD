@@ -1,0 +1,22 @@
+fleet_analyzer/
+├── app.py                      # Main entry point and application setup
+│
+├── settings.py                 # All configuration in one place
+│
+├── data/
+│   ├── models.py               # Data models and structures
+│   ├── providers.py            # Data retrieval services (API clients)
+│   └── processor.py            # Data processing pipeline
+│
+├── analysis/
+│   ├── calculations.py         # Core analysis calculations
+│   ├── charts.py               # Chart generation and visualization
+│   └── reports.py              # Report generation and exports
+│
+├── ui/
+│   ├── main_window.py          # Main application window
+│   ├── process_panel.py        # Data processing panel
+│   ├── results_panel.py        # Results display panel
+│   └── analysis_panel.py       # Analysis tools panel
+│
+└── utils.py                    # Utility functions and helpers
