@@ -204,6 +204,36 @@ def case_insensitive_equal(a: str, b: str) -> bool:
     """
     return a.strip().lower() == b.strip().lower()
 
+def normalize_vehicle_model(model: str) -> str:
+    """
+    Normalize a vehicle model name for comparison.
+    Removes special characters and standardizes common variations.
+    
+    Args:
+        model: Vehicle model name
+        
+    Returns:
+        Normalized model name
+    """
+    # Convert to lowercase and strip whitespace
+    normalized = model.strip().lower()
+    
+    # Remove special characters but preserve numbers
+    normalized = ''.join(c for c in normalized if c.isalnum() or c.isspace())
+    
+    # Standardize spacing
+    normalized = ' '.join(normalized.split())
+    
+    # Handle special cases like F-150 -> f150
+    normalized = normalized.replace('f 150', 'f150')
+    normalized = normalized.replace('f 250', 'f250')
+    normalized = normalized.replace('f 350', 'f350')
+    normalized = normalized.replace('e 150', 'e150')
+    normalized = normalized.replace('e 250', 'e250')
+    normalized = normalized.replace('e 350', 'e350')
+    
+    return normalized
+
 def safe_cast(value: Any, to_type: Callable, default: Any = None) -> Any:
     """
     Safely cast a value to a specified type.

@@ -23,7 +23,7 @@ from settings import (
     RETRY_DELAY,
     RATE_LIMIT_DELAY
 )
-from utils import Cache, case_insensitive_equal
+from utils import Cache, case_insensitive_equal, normalize_vehicle_model
 from data.models import (
     VehicleIdentification, 
     FuelEconomyData,
@@ -492,14 +492,18 @@ class FuelEconomyClient(BaseApiClient):
             logger.warning(f"No models found for {matched_make} {year}")
             return []
         
+        # Normalize the search model name
+        normalized_model = normalize_vehicle_model(model)
+        
         # Find model matches (exact or partial)
-        lower_model = model.lower()
-        exact_matches = [m for m in models_list if m["text"].lower() == lower_model]
+        exact_matches = [m for m in models_list 
+                        if normalize_vehicle_model(m["text"]) == normalized_model]
         
         if exact_matches:
             matched_models = exact_matches
         else:
-            matched_models = [m for m in models_list if lower_model in m["text"].lower()]
+            matched_models = [m for m in models_list 
+                            if normalized_model in normalize_vehicle_model(m["text"])]
         
         if not matched_models:
             logger.warning(f"Model '{model}' not found for {matched_make} {year}")
@@ -518,7 +522,7 @@ class FuelEconomyClient(BaseApiClient):
             if not options:
                 continue
             
-            # Filter options by model and engine displacement if provided
+            # Filter options by model and engine displacement
             filtered_options = self._filter_options(options, model, engine_disp)
             all_options.extend(filtered_options)
         
@@ -546,10 +550,12 @@ class FuelEconomyClient(BaseApiClient):
         Returns:
             Filtered list of options
         """
-        lower_model = model.lower()
+        # Normalize the model name for comparison
+        normalized_model = normalize_vehicle_model(model)
         
         # Filter by model first
-        model_filtered = [o for o in options if lower_model in o["text"].lower()]
+        model_filtered = [o for o in options 
+                         if normalized_model in normalize_vehicle_model(o["text"])]
         
         # If no matches, return original options
         if not model_filtered:
