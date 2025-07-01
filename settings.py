@@ -169,7 +169,20 @@ COLUMN_NAME_MAP = {
     "Annual Mileage": "Annual Mileage",
     "Asset ID": "Asset ID",
     "Department": "Department",
-    "Location": "Location"
+    "Location": "Location",
+    
+    # Enhanced commercial vehicle fields for Step 12
+    "Commercial Category": "Commercial Category",
+    "GVWR (lbs)": "GVWR (pounds)",
+    "Engine HP": "Engine Horsepower",
+    "Engine Type": "Engine Configuration",
+    "FuelTypeSecondary": "Fuel Type (Secondary)",
+    "Vehicle Class": "Vehicle Class",
+    "Series": "Series",
+    "Trim": "Trim Level",
+    "Is Diesel": "Diesel Engine",
+    "Is Commercial": "Commercial Vehicle",
+    "Commercial Summary": "Commercial Summary"
 }
 
 # Define field categories for UI organization
@@ -178,25 +191,103 @@ FIELD_CATEGORIES = {
         "VIN", "Year", "Make", "Model", "FuelTypePrimary", "BodyClass", 
         "GVWR", "MPG City", "MPG Highway", "MPG Combined", "CO2 emissions"
     ],
+    "Commercial Vehicle": [
+        "Commercial Category", "GVWR (lbs)", "Engine HP", "Engine Type", 
+        "Is Diesel", "Is Commercial", "Commercial Summary", "Vehicle Class"
+    ],
+    "Vehicle Details": [
+        "FuelTypeSecondary", "Series", "Trim", "cylinders", "displ", "drive", "trany"
+    ],
     "Alternative Fuel": [
         "fuelType2", "co2A", "rangeA", "phevBlended", "phevCity", "phevComb"
-    ],
-    "Technical": [
-        "cylinders", "displ", "drive", "trany", "fuelCost08"
     ],
     "Fleet Management": [
         "Odometer", "Annual Mileage", "Asset ID", "Department", "Location"
     ],
+    "Analysis": [
+        "Data Quality", "Processing Status", "feScore", "ghgScore", "ghgScoreA"
+    ],
     "Advanced": [
-        "feScore", "ghgScore", "ghgScoreA", "combinedCD", "startStop", "VClass"
+        "combinedCD", "startStop", "VClass", "fuelCost08", "Processing Error"
     ]
 }
 
 # Initial visible columns in the results table (can be customized by user)
 DEFAULT_VISIBLE_COLUMNS = [
     "VIN", "Year", "Make", "Model", "FuelTypePrimary", "BodyClass", 
-    "MPG Combined", "CO2 emissions", "Annual Mileage", "Asset ID"
+    "MPG Combined", "CO2 emissions", "Commercial Category", "GVWR (lbs)",
+    "Data Quality", "Processing Status", "Annual Mileage", "Asset ID"
 ]
+
+# Additional data column mappings for common fleet management field names
+# Maps various input column names to standardized field names
+ADDITIONAL_DATA_MAPPINGS = {
+    # Asset/Vehicle identification
+    "asset_id": ["asset_id", "asset id", "asset_number", "asset number", "asset#", "unit_id", 
+                 "unit id", "unit_number", "unit number", "unit#", "vehicle_id", "vehicle id", 
+                 "vehicle_number", "vehicle number", "fleet_id", "fleet id", "fleet_number", 
+                 "tag_number", "tag number", "equipment_id", "equipment id"],
+    
+    # Mileage/Odometer
+    "odometer": ["odometer", "odo", "mileage", "miles", "current_mileage", "current mileage",
+                 "meter_reading", "meter reading", "total_miles", "total miles"],
+    
+    "annual_mileage": ["annual_mileage", "annual mileage", "yearly_mileage", "yearly mileage",
+                       "miles_per_year", "miles per year", "average_annual_miles", 
+                       "average annual miles", "estimated_annual_miles", "est_annual_miles"],
+    
+    # Department/Organization
+    "department": ["department", "dept", "division", "section", "unit", "group", "team",
+                   "organization", "org", "cost_center", "cost center", "business_unit",
+                   "business unit", "program", "service_area", "service area"],
+    
+    # Location/Site
+    "location": ["location", "site", "facility", "station", "base", "yard", "depot",
+                 "garage", "address", "city", "region", "district", "zone", "area"],
+    
+    # Driver/Operator
+    "driver": ["driver", "operator", "assigned_to", "assigned to", "user", "employee",
+               "operator_name", "operator name", "driver_name", "driver name"],
+    
+    # Dates
+    "acquisition_date": ["acquisition_date", "acquisition date", "purchase_date", 
+                         "purchase date", "date_acquired", "date acquired", "in_service_date",
+                         "in service date", "start_date", "start date"],
+    
+    "retire_date": ["retire_date", "retire date", "retirement_date", "retirement date",
+                    "end_date", "end date", "disposal_date", "disposal date"],
+    
+    # Financial
+    "purchase_price": ["purchase_price", "purchase price", "cost", "price", "value",
+                       "acquisition_cost", "acquisition cost", "original_cost", "original cost"],
+    
+    "fuel_card": ["fuel_card", "fuel card", "card_number", "card number", "fuel_id", "fuel id"],
+    
+    # Vehicle specifications
+    "license_plate": ["license_plate", "license plate", "plate", "plate_number", 
+                      "plate number", "tag", "registration", "reg_number", "reg number"],
+    
+    "vin_last_8": ["vin_last_8", "vin last 8", "last_8", "last 8", "partial_vin", "partial vin"],
+    
+    # Usage/Classification  
+    "vehicle_type": ["vehicle_type", "vehicle type", "type", "class", "category", 
+                     "classification", "use_type", "use type"],
+    
+    "fuel_type": ["fuel_type", "fuel type", "fuel", "primary_fuel", "primary fuel"],
+    
+    # Maintenance
+    "last_service": ["last_service", "last service", "last_maintenance", "last maintenance",
+                     "service_date", "service date", "maintenance_date", "maintenance date"],
+    
+    "next_service": ["next_service", "next service", "next_maintenance", "next maintenance",
+                     "due_date", "due date", "service_due", "service due"],
+    
+    # Custom fields
+    "notes": ["notes", "comments", "remarks", "description", "memo", "additional_info",
+              "additional info", "special_instructions", "special instructions"],
+    
+    "status": ["status", "condition", "state", "active", "inactive", "available", "unavailable"]
+}
 
 ###############################################################################
 # Cache Configuration

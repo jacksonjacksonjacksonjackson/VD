@@ -1,0 +1,82 @@
+[
+  {
+    "timestamp": "2025-07-01T14:11:02.347958",
+    "input_file": "/Applications/VS Code/Resources/Test Data/VINS/100 Test VINs.csv",
+    "output_file": "/Applications/VS Code/Resources/Test Data/VINS/100 Test VINs_fleet_analysis_20250701_141053.csv",
+    "max_threads": 10,
+    "skip_existing": true,
+    "input_filename": "100 Test VINs.csv"
+  },
+  {
+    "timestamp": "2025-07-01T14:11:23.363648",
+    "input_file": "/Applications/VS Code/Resources/Test Data/VINS/100 Test VINs.csv",
+    "output_file": "/Applications/VS Code/Resources/Test Data/VINS/100 Test VINs_fleet_analysis_20250701_141053.csv",
+    "max_threads": 10,
+    "skip_existing": true,
+    "input_filename": "100 Test VINs.csv"
+  },
+  {
+    "timestamp": "2025-07-01T14:15:38.187111",
+    "input_file": "/Applications/VS Code/Resources/Test Data/VINS/100 Test VINs.csv",
+    "output_file": "/Applications/VS Code/Resources/Test Data/VINS/100 Test VINs_fleet_analysis_20250701_141534.csv",
+    "max_threads": 10,
+    "skip_existing": true,
+    "input_filename": "100 Test VINs.csv"
+  },
+  {
+    "timestamp": "2025-07-01T14:51:00.899887",
+    "input_file": "/Applications/VS Code/Resources/Test Data/VINS/100 Test VINs.csv",
+    "output_file": "/Applications/VS Code/Resources/Test Data/VINS/100 Test VINs_fleet_analysis_20250701_145040.csv",
+    "max_threads": 10,
+    "skip_existing": true,
+    "input_filename": "100 Test VINs.csv"
+  },
+  {
+    "timestamp": "2025-07-01T14:53:38.093541",
+    "input_file": "/Applications/VS Code/Resources/Test Data/VINS/100 Test VINs.csv",
+    "output_file": "/Applications/VS Code/Resources/Test Data/VINS/100 Test VINs_fleet_analysis_20250701_145336.csv",
+    "max_threads": 10,
+    "skip_existing": true,
+    "input_filename": "100 Test VINs.csv"
+  },
+  {
+    "timestamp": "2025-07-01T15:08:37.914523",
+    "input_file": "/Applications/VS Code/Resources/Test Data/VINS/100 Test VINs.csv",
+    "output_file": "/Applications/VS Code/Resources/Test Data/VINS/100 Test VINs_fleet_analysis_20250701_150836.csv",
+    "max_threads": 10,
+    "skip_existing": true,
+    "input_filename": "100 Test VINs.csv"
+  },
+  {
+    "timestamp": "2025-07-01T15:25:30.794251",
+    "input_file": "/Applications/VS Code/Resources/Test Data/VINS/100 Test VINs.csv",
+    "output_file": "/Applications/VS Code/Resources/Test Data/VINS/100 Test VINs_fleet_analysis_20250701_152529.csv",
+    "max_threads": 10,
+    "skip_existing": true,
+    "input_filename": "100 Test VINs.csv"
+  },
+  {
+    "timestamp": "2025-07-01T15:37:52.072694",
+    "input_file": "/Applications/VS Code/Resources/Test Data/VINS/100 Test VINs.csv",
+    "output_file": "/Applications/VS Code/Resources/Test Data/VINS/100 Test VINs_fleet_analysis_20250701_153750.csv",
+    "max_threads": 10,
+    "skip_existing": true,
+    "input_filename": "100 Test VINs.csv"
+  },
+  {
+    "timestamp": "2025-07-01T16:37:06.324451",
+    "input_file": "/Applications/VS Code/Resources/Test Data/VINS/100 Test VINs.csv",
+    "output_file": "/Applications/VS Code/Resources/Test Data/VINS/100 Test VINs_fleet_analysis_20250701_163704.csv",
+    "max_threads": 10,
+    "skip_existing": true,
+    "input_filename": "100 Test VINs.csv"
+  },
+  {
+    "timestamp": "2025-07-01T16:57:59.600284",
+    "input_file": "/Applications/VS Code/Resources/Test Data/VINS/100 Test VINs.csv",
+    "output_file": "/Applications/VS Code/Resources/Test Data/VINS/100 Test VINs_fleet_analysis_20250701_165758.csv",
+    "max_threads": 10,
+    "skip_existing": true,
+    "input_filename": "100 Test VINs.csv"
+  }
+]

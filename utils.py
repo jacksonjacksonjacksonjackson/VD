@@ -207,7 +207,7 @@ def case_insensitive_equal(a: str, b: str) -> bool:
 def normalize_vehicle_model(model: str) -> str:
     """
     Normalize a vehicle model name for comparison.
-    Removes special characters and standardizes common variations.
+    Enhanced for commercial vehicle matching (F-150 vs F150, etc.).
     
     Args:
         model: Vehicle model name
@@ -215,8 +215,31 @@ def normalize_vehicle_model(model: str) -> str:
     Returns:
         Normalized model name
     """
+    import re
+    
     # Convert to lowercase and strip whitespace
     normalized = model.strip().lower()
+    
+    # Enhanced Ford F-series normalization (F-150, F-250, etc. -> f150, f250)
+    # Handles F-150, F 150, F150 all to f150
+    normalized = re.sub(r'f[-\s]*(\d{3})', r'f\1', normalized)
+    
+    # Enhanced Ford E-series normalization (E-250, E-350, etc. -> e250, e350)  
+    # Handles E-250, E 250, E250 all to e250
+    normalized = re.sub(r'e[-\s]*(\d{3})', r'e\1', normalized)
+    
+    # Ford Super Duty normalization (remove "super duty" text)
+    normalized = re.sub(r'\bsuper\s*duty\b', '', normalized)
+    
+    # Chevy/GMC commercial vehicle patterns
+    # Silverado 1500 -> silverado1500, Sierra 2500 -> sierra2500
+    normalized = re.sub(r'(silverado|sierra)[-\s]*(\d{4})', r'\1\2', normalized)
+    
+    # Ram truck patterns (Ram 1500 -> ram1500)
+    normalized = re.sub(r'ram[-\s]*(\d{4})', r'ram\1', normalized)
+    
+    # Express/Savana van patterns (Express 2500 -> express2500)
+    normalized = re.sub(r'(express|savana)[-\s]*(\d{4})', r'\1\2', normalized)
     
     # Remove special characters but preserve numbers
     normalized = ''.join(c for c in normalized if c.isalnum() or c.isspace())
@@ -224,10 +247,14 @@ def normalize_vehicle_model(model: str) -> str:
     # Standardize spacing
     normalized = ' '.join(normalized.split())
     
-    # Handle special cases like F-150 -> f150
+    # Additional legacy F-series handling for any remaining cases
     normalized = normalized.replace('f 150', 'f150')
-    normalized = normalized.replace('f 250', 'f250')
+    normalized = normalized.replace('f 250', 'f250') 
     normalized = normalized.replace('f 350', 'f350')
+    normalized = normalized.replace('f 450', 'f450')
+    normalized = normalized.replace('f 550', 'f550')
+    
+    # Additional legacy E-series handling
     normalized = normalized.replace('e 150', 'e150')
     normalized = normalized.replace('e 250', 'e250')
     normalized = normalized.replace('e 350', 'e350')
@@ -769,23 +796,52 @@ def validate_vin(vin: str) -> bool:
     Returns:
         True if VIN passes basic validation
     """
-    # Basic validation (more comprehensive validation would include checksum)
-    if not vin:
-        return False
+    # Use detailed validation and return only True/False for backward compatibility
+    is_valid, _ = validate_vin_detailed(vin)
+    return is_valid
+
+def validate_vin_detailed(vin: str) -> Tuple[bool, str]:
+    """
+    Check if a VIN is valid and provide detailed error information.
     
-    # Remove spaces and convert to uppercase
-    vin = vin.replace(" ", "").upper()
+    Args:
+        vin: Vehicle Identification Number to validate
+        
+    Returns:
+        Tuple of (is_valid, error_message)
+        If valid: (True, "")
+        If invalid: (False, "User-friendly error description")
+    """
+    # Check if VIN is provided
+    if not vin or not vin.strip():
+        return False, "VIN is required - please provide a Vehicle Identification Number"
+    
+    # Clean the VIN
+    original_vin = vin
+    vin = vin.replace(" ", "").replace("-", "").upper().strip()
     
     # Check length (should be 17 characters for modern vehicles)
-    if len(vin) != 17:
-        return False
+    if len(vin) < 17:
+        return False, f"VIN is too short - found {len(vin)} characters, need 17 (example: 1HGBH41JXMN109186)"
+    elif len(vin) > 17:
+        return False, f"VIN is too long - found {len(vin)} characters, need exactly 17"
     
-    # Check for invalid characters
+    # Check for invalid characters (VINs exclude I, O, Q to avoid confusion with 1, 0)
     valid_chars = set("0123456789ABCDEFGHJKLMNPRSTUVWXYZ")
-    if not all(c in valid_chars for c in vin):
-        return False
+    invalid_chars = [c for c in vin if c not in valid_chars]
     
-    return True
+    if invalid_chars:
+        invalid_list = ", ".join(set(invalid_chars))
+        return False, f"VIN contains invalid characters: {invalid_list} (VINs cannot contain I, O, or Q)"
+    
+    # Check for common mistakes
+    if vin.count('0') > 8:  # Too many zeros might indicate placeholder
+        return False, "VIN appears to contain placeholder zeros - please verify the actual VIN"
+    
+    if vin == "1" * 17 or vin == "0" * 17:  # Obvious test data
+        return False, "VIN appears to be test data - please provide the actual vehicle VIN"
+    
+    return True, ""
 
 def validate_year(year: str) -> bool:
     """
@@ -803,3 +859,655 @@ def validate_year(year: str) -> bool:
         return 1900 <= year_int <= current_year + 1
     except ValueError:
         return False
+
+###############################################################################
+# Commercial Vehicle Detection - Step 12 Enhancement
+###############################################################################
+
+def extract_gvwr_pounds(gvwr_text: str) -> Tuple[float, str]:
+    """
+    Extract numeric GVWR value from various text formats.
+    
+    Args:
+        gvwr_text: Raw GVWR text from NHTSA API
+        
+    Returns:
+        Tuple of (gvwr_pounds, commercial_category)
+        
+    Examples:
+        "Class 1: 6,000 lb (2,722 kg)" -> (6000.0, "Light Duty")
+        "8500" -> (8500.0, "Light Duty")
+        "19,500 lb" -> (19500.0, "Medium Duty")
+    """
+    import re
+    
+    if not gvwr_text:
+        return 0.0, ""
+    
+    # Patterns to extract GVWR in pounds
+    patterns = [
+        r'(\d{1,2},?\d{3})\s*(?:lb|lbs|pounds?)',  # "6,000 lb" or "6000 lb"
+        r'(\d{1,2},?\d{3})\s*(?:\(|$)',  # "6,000 (" or "6000" at end
+        r':\s*(\d{1,2},?\d{3})',  # ": 6,000"
+        r'(\d{4,6})'  # Raw numbers like "6000"
+    ]
+    
+    gvwr_pounds = 0.0
+    for pattern in patterns:
+        match = re.search(pattern, gvwr_text.replace(',', ''))
+        if match:
+            try:
+                gvwr_pounds = float(match.group(1).replace(',', ''))
+                break
+            except ValueError:
+                continue
+    
+    # Classify commercial category based on GVWR
+    if gvwr_pounds > 0:
+        if gvwr_pounds <= 8500:
+            commercial_category = "Light Duty"
+        elif gvwr_pounds <= 19500:
+            commercial_category = "Medium Duty" 
+        elif gvwr_pounds <= 33000:
+            commercial_category = "Heavy Duty"
+        else:
+            commercial_category = "Extra Heavy Duty"
+    else:
+        commercial_category = ""
+    
+    return gvwr_pounds, commercial_category
+
+def detect_commercial_vehicle(make: str, model: str, body_class: str, 
+                            gvwr_pounds: float = 0.0) -> bool:
+    """
+    Determine if a vehicle is likely a commercial vehicle.
+    
+    Args:
+        make: Vehicle manufacturer
+        model: Vehicle model
+        body_class: Vehicle body class
+        gvwr_pounds: Gross vehicle weight rating in pounds
+        
+    Returns:
+        True if vehicle appears to be commercial
+    """
+    # Commercial indicators by body class
+    commercial_body_classes = [
+        "truck", "van", "bus", "chassis cab", "cutaway", "pickup",
+        "cargo van", "passenger van", "step van", "box truck",
+        "utility", "commercial", "work truck", "crew cab"
+    ]
+    
+    # Commercial vehicle models (common fleet vehicles)
+    commercial_models = [
+        # Ford commercial lineup
+        "transit", "e-series", "f-150", "f-250", "f-350", "f-450", "f-550",
+        "f150", "f250", "f350", "f450", "f550", "econoline",
+        
+        # GM commercial lineup  
+        "express", "savana", "silverado", "sierra", 
+        
+        # Chrysler/RAM commercial lineup
+        "promaster", "ram 1500", "ram 2500", "ram 3500", "ram1500", "ram2500", "ram3500",
+        
+        # Other commercial vehicles
+        "sprinter", "metris", "nv200", "nv1500", "nv2500", "nv3500",
+        "city express", "connect"
+    ]
+    
+    # Check body class
+    body_lower = body_class.lower()
+    for indicator in commercial_body_classes:
+        if indicator in body_lower:
+            return True
+    
+    # Check model name
+    model_lower = model.lower()
+    for indicator in commercial_models:
+        if indicator in model_lower:
+            return True
+    
+    # Check GVWR (vehicles over 8,500 lbs are typically commercial)
+    if gvwr_pounds > 8500:
+        return True
+    
+    # Check make-specific patterns
+    make_lower = make.lower()
+    if make_lower in ["isuzu", "mack", "peterbilt", "kenworth", "freightliner", "volvo trucks"]:
+        return True  # These are primarily commercial vehicle manufacturers
+    
+    return False
+
+def detect_diesel_engine(fuel_type_primary: str = "", fuel_type_secondary: str = "", 
+                        engine_type: str = "", model: str = "") -> bool:
+    """
+    Detect if a vehicle uses diesel fuel.
+    
+    Args:
+        fuel_type_primary: Primary fuel type from NHTSA
+        fuel_type_secondary: Secondary fuel type from NHTSA
+        engine_type: Engine type/configuration from NHTSA
+        model: Vehicle model name
+        
+    Returns:
+        True if vehicle appears to use diesel
+    """
+    diesel_indicators = [
+        "diesel", "biodiesel", "b20", "b100", 
+        "compression ignition", "ci", "cng/diesel",
+        "diesel electric", "hybrid diesel"
+    ]
+    
+    # Check all fuel and engine fields
+    fields_to_check = [
+        fuel_type_primary.lower(),
+        fuel_type_secondary.lower(), 
+        engine_type.lower()
+    ]
+    
+    for field in fields_to_check:
+        for indicator in diesel_indicators:
+            if indicator in field:
+                return True
+    
+    # Check model name for diesel indicators
+    model_lower = model.lower()
+    diesel_model_indicators = [
+        "duramax", "powerstroke", "cummins", "ecodiesel", "bluetec"
+    ]
+    
+    for indicator in diesel_model_indicators:
+        if indicator in model_lower:
+            return True
+    
+    return False
+
+def classify_commercial_category(gvwr_pounds: float, body_class: str = "") -> str:
+    """
+    Classify commercial category based on GVWR and body class.
+    
+    Args:
+        gvwr_pounds: Gross vehicle weight rating in pounds
+        body_class: Vehicle body class (optional)
+        
+    Returns:
+        Commercial category string
+    """
+    # GVWR-based classification (US DOT standards)
+    if gvwr_pounds <= 0:
+        return ""
+    elif gvwr_pounds <= 8500:
+        return "Light Duty"
+    elif gvwr_pounds <= 19500:
+        return "Medium Duty"
+    elif gvwr_pounds <= 33000:
+        return "Heavy Duty"
+    else:
+        return "Extra Heavy Duty"
+
+def get_commercial_summary(commercial_category: str, is_diesel: bool, 
+                          gvwr_pounds: float, is_commercial: bool) -> str:
+    """
+    Generate a summary string of commercial vehicle characteristics.
+    
+    Args:
+        commercial_category: Light/Medium/Heavy Duty classification
+        is_diesel: Whether vehicle uses diesel
+        gvwr_pounds: Gross vehicle weight in pounds
+        is_commercial: Whether classified as commercial vehicle
+        
+    Returns:
+        Human-readable commercial summary string
+    """
+    if not is_commercial:
+        return "Passenger Vehicle"
+    
+    parts = []
+    
+    if commercial_category:
+        parts.append(commercial_category)
+    
+    if is_diesel:
+        parts.append("Diesel")
+    
+    if gvwr_pounds > 0:
+        parts.append(f"GVWR: {gvwr_pounds:,.0f} lb")
+    
+    return " | ".join(parts) if parts else "Commercial Vehicle"
+
+def extract_engine_power(engine_hp: str, engine_kw: str) -> Tuple[str, str]:
+    """
+    Clean and format engine power values.
+    
+    Args:
+        engine_hp: Horsepower string from NHTSA
+        engine_kw: Kilowatt string from NHTSA
+        
+    Returns:
+        Tuple of (formatted_hp, formatted_kw)
+    """
+    import re
+    
+    # Clean HP value
+    hp_clean = ""
+    if engine_hp:
+        # Extract numeric value from HP string
+        hp_match = re.search(r'(\d+(?:\.\d+)?)', str(engine_hp))
+        if hp_match:
+            hp_clean = f"{hp_match.group(1)} HP"
+    
+    # Clean KW value  
+    kw_clean = ""
+    if engine_kw:
+        # Extract numeric value from KW string
+        kw_match = re.search(r'(\d+(?:\.\d+)?)', str(engine_kw))
+        if kw_match:
+            kw_clean = f"{kw_match.group(1)} kW"
+    
+    return hp_clean, kw_clean
+
+# Enhanced error communication utilities
+class ErrorCommunicator:
+    """Enhanced error communication with user-friendly messages and suggested fixes."""
+    
+    ERROR_CATEGORIES = {
+        "vin_format": {
+            "title": "VIN Format Error",
+            "icon": "❌",
+            "color": "#d32f2f"
+        },
+        "file_access": {
+            "title": "File Access Error", 
+            "icon": "📁",
+            "color": "#f57c00"
+        },
+        "api_error": {
+            "title": "Data Lookup Error",
+            "icon": "🌐", 
+            "color": "#1976d2"
+        },
+        "processing": {
+            "title": "Processing Error",
+            "icon": "⚙️",
+            "color": "#7b1fa2"
+        },
+        "validation": {
+            "title": "Data Validation Error",
+            "icon": "⚠️",
+            "color": "#f57c00"
+        }
+    }
+    
+    @classmethod
+    def show_error_dialog(cls, parent, category: str, message: str, details: str = "", 
+                         suggested_fixes: List[str] = None, context_help: str = ""):
+        """
+        Show an enhanced error dialog with category-specific styling and helpful suggestions.
+        
+        Args:
+            parent: Parent window
+            category: Error category from ERROR_CATEGORIES
+            message: Main error message
+            details: Additional details
+            suggested_fixes: List of suggested solutions
+            context_help: Context-sensitive help information
+        """
+        category_info = cls.ERROR_CATEGORIES.get(category, cls.ERROR_CATEGORIES["processing"])
+        
+        # Create custom dialog
+        dialog = tk.Toplevel(parent)
+        dialog.title(category_info["title"])
+        dialog.resizable(False, False)
+        dialog.transient(parent)
+        dialog.grab_set()
+        
+        # Calculate position (center on parent)
+        width = 500
+        height = 400
+        parent_x = parent.winfo_rootx()
+        parent_y = parent.winfo_rooty()
+        parent_width = parent.winfo_width()
+        parent_height = parent.winfo_height()
+        x = parent_x + (parent_width // 2) - (width // 2)
+        y = parent_y + (parent_height // 2) - (height // 2)
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+        
+        # Main frame
+        main_frame = ttk.Frame(dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Header with icon and title
+        header_frame = ttk.Frame(main_frame)
+        header_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        icon_label = tk.Label(
+            header_frame, 
+            text=category_info["icon"], 
+            font=("Segoe UI", 24),
+            fg=category_info["color"]
+        )
+        icon_label.pack(side=tk.LEFT, padx=(0, 10))
+        
+        title_label = tk.Label(
+            header_frame,
+            text=category_info["title"],
+            font=("Segoe UI", 14, "bold"),
+            fg=category_info["color"]
+        )
+        title_label.pack(side=tk.LEFT, anchor=tk.W)
+        
+        # Main message
+        message_label = tk.Label(
+            main_frame,
+            text=message,
+            font=("Segoe UI", 11),
+            wraplength=450,
+            justify=tk.LEFT
+        )
+        message_label.pack(fill=tk.X, pady=(0, 10))
+        
+        # Details section
+        if details:
+            details_frame = ttk.LabelFrame(main_frame, text="Details")
+            details_frame.pack(fill=tk.X, pady=(0, 10))
+            
+            details_text = tk.Text(
+                details_frame, 
+                height=4, 
+                wrap=tk.WORD, 
+                bg="#f5f5f5",
+                font=("Consolas", 9)
+            )
+            details_text.pack(fill=tk.X, padx=10, pady=10)
+            details_text.insert(1.0, details)
+            details_text.config(state=tk.DISABLED)
+        
+        # Suggested fixes
+        if suggested_fixes:
+            fixes_frame = ttk.LabelFrame(main_frame, text="💡 Suggested Solutions")
+            fixes_frame.pack(fill=tk.X, pady=(0, 10))
+            
+            for i, fix in enumerate(suggested_fixes, 1):
+                fix_label = tk.Label(
+                    fixes_frame,
+                    text=f"{i}. {fix}",
+                    font=("Segoe UI", 10),
+                    wraplength=450,
+                    justify=tk.LEFT,
+                    anchor=tk.W
+                )
+                fix_label.pack(fill=tk.X, padx=10, pady=2)
+        
+        # Context help
+        if context_help:
+            help_frame = ttk.LabelFrame(main_frame, text="ℹ️ Additional Help")
+            help_frame.pack(fill=tk.X, pady=(0, 15))
+            
+            help_label = tk.Label(
+                help_frame,
+                text=context_help,
+                font=("Segoe UI", 9),
+                wraplength=450,
+                justify=tk.LEFT,
+                fg="#666666"
+            )
+            help_label.pack(fill=tk.X, padx=10, pady=10)
+        
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X)
+        
+        ttk.Button(
+            button_frame,
+            text="OK",
+            command=dialog.destroy
+        ).pack(side=tk.RIGHT, padx=(10, 0))
+        
+        if context_help:
+            ttk.Button(
+                button_frame,
+                text="Copy Details",
+                command=lambda: cls._copy_error_details(category, message, details)
+            ).pack(side=tk.RIGHT)
+    
+    @classmethod
+    def _copy_error_details(cls, category: str, message: str, details: str):
+        """Copy error details to clipboard for support."""
+        import datetime
+        
+        error_report = f"""Fleet Electrification Analyzer - Error Report
+Generated: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+Category: {category}
+Message: {message}
+
+Details:
+{details}
+
+Please include this information when reporting issues.
+"""
+        
+        # Copy to clipboard
+        root = tk._default_root
+        if root:
+            root.clipboard_clear()
+            root.clipboard_append(error_report)
+    
+    @classmethod
+    def get_vin_error_message(cls, vin: str, error_type: str) -> Tuple[str, List[str]]:
+        """
+        Get user-friendly VIN error message with suggested fixes.
+        
+        Args:
+            vin: The problematic VIN
+            error_type: Type of VIN error
+            
+        Returns:
+            Tuple of (message, suggested_fixes)
+        """
+        if error_type == "length":
+            message = f"The VIN '{vin}' has {len(vin)} characters, but VINs must be exactly 17 characters long."
+            fixes = [
+                "Check for missing characters at the beginning or end",
+                "Remove any spaces or special characters",
+                "Verify the VIN from the vehicle documentation"
+            ]
+        
+        elif error_type == "invalid_chars":
+            message = f"The VIN '{vin}' contains invalid characters. VINs can only contain letters and numbers (except I, O, and Q)."
+            fixes = [
+                "Replace any I, O, Q characters with 1, 0, or other valid characters",
+                "Remove spaces, hyphens, or other special characters", 
+                "Check if characters were misread (e.g., 8 vs B, 5 vs S)"
+            ]
+        
+        elif error_type == "placeholder":
+            message = f"The VIN '{vin}' appears to be a placeholder or template rather than a real VIN."
+            fixes = [
+                "Replace with the actual VIN from the vehicle",
+                "Check vehicle registration or insurance documents",
+                "Look for the VIN on the dashboard or driver's side door frame"
+            ]
+        
+        else:
+            message = f"The VIN '{vin}' is not valid."
+            fixes = [
+                "Verify the VIN is exactly 17 characters",
+                "Check for invalid characters (I, O, Q are not allowed)",
+                "Ensure it's a real VIN, not a placeholder"
+            ]
+        
+        return message, fixes
+    
+    @classmethod
+    def get_file_error_message(cls, filepath: str, error_type: str) -> Tuple[str, List[str]]:
+        """
+        Get user-friendly file error message with suggested fixes.
+        
+        Args:
+            filepath: The problematic file path
+            error_type: Type of file error
+            
+        Returns:
+            Tuple of (message, suggested_fixes)
+        """
+        filename = os.path.basename(filepath)
+        
+        if error_type == "not_found":
+            message = f"The file '{filename}' could not be found."
+            fixes = [
+                "Check if the file was moved or deleted",
+                "Verify the file path is correct",
+                "Use the Browse button to select the file again"
+            ]
+        
+        elif error_type == "permission":
+            message = f"Permission denied when trying to access '{filename}'."
+            fixes = [
+                "Check if the file is open in another program (like Excel)",
+                "Run the application as administrator",
+                "Verify you have read/write permissions for this location"
+            ]
+        
+        elif error_type == "format":
+            message = f"The file '{filename}' is not in the expected CSV format."
+            fixes = [
+                "Save the file as CSV format (.csv extension)",
+                "Check if the file uses the correct delimiter (comma)",
+                "Use the 'Download Sample CSV' button to see the expected format"
+            ]
+        
+        elif error_type == "encoding":
+            message = f"The file '{filename}' has encoding issues and cannot be read properly."
+            fixes = [
+                "Save the file with UTF-8 encoding",
+                "Open in Excel and 'Save As' CSV (UTF-8)",
+                "Remove any special characters that might cause encoding issues"
+            ]
+        
+        else:
+            message = f"An error occurred while processing the file '{filename}'."
+            fixes = [
+                "Check if the file is corrupted",
+                "Try opening the file in Excel to verify it's readable",
+                "Use a different file or recreate the CSV"
+            ]
+        
+        return message, fixes
+
+class ContextHelp:
+    """Context-sensitive help system for user guidance."""
+    
+    HELP_TOPICS = {
+        "vin_format": """
+VIN (Vehicle Identification Number) Format:
+• Must be exactly 17 characters long
+• Contains letters and numbers only
+• Cannot contain I, O, or Q (to avoid confusion with 1, 0)
+• Each position has a specific meaning for vehicle details
+
+Common VIN locations on vehicles:
+• Dashboard (visible through windshield)
+• Driver's side door frame
+• Vehicle registration documents
+• Insurance cards
+        """,
+        
+        "csv_format": """
+CSV File Format Requirements:
+• Must have a 'VIN' or 'VINs' column header
+• One VIN per row
+• Additional columns are preserved (Asset ID, Department, etc.)
+• Use comma as delimiter
+• UTF-8 encoding recommended
+
+Example format:
+VIN,Asset ID,Department
+1HGBH41JXMN109186,TRUCK001,Public Works
+1FTFW1ET5DKE55321,VAN002,Parks & Recreation
+        """,
+        
+        "processing_options": """
+Processing Options:
+• Max Threads: Number of parallel processing threads (1-32)
+  - Higher values = faster processing
+  - Lower values = less system resource usage
+  
+• Skip Existing VINs: Skip VINs already in output file
+  - Useful for resuming interrupted processing
+  - Prevents duplicate entries
+
+• Auto-generate filename: Creates timestamped output files
+  - Format: filename_fleet_analysis_YYYYMMDD_HHMMSS.csv
+  - Prevents accidental overwrites
+        """,
+        
+        "data_quality": """
+Data Quality Indicators:
+• High (80-100%): Complete vehicle information available
+• Medium (50-80%): Some details missing but usable
+• Low (0-50%): Limited information found
+• Failed: VIN invalid or no data found
+
+Quality factors:
+• VIN validity and format
+• Successful API data retrieval
+• Commercial vehicle data completeness
+• Cross-source data consistency
+        """
+    }
+    
+    @classmethod
+    def show_help_dialog(cls, parent, topic: str, title: str = "Help"):
+        """Show context-sensitive help dialog."""
+        help_text = cls.HELP_TOPICS.get(topic, "Help information not available for this topic.")
+        
+        # Create help dialog
+        dialog = tk.Toplevel(parent)
+        dialog.title(title)
+        dialog.resizable(True, True)
+        dialog.transient(parent)
+        
+        # Size and position
+        width = 600
+        height = 400
+        parent_x = parent.winfo_rootx()
+        parent_y = parent.winfo_rooty()
+        parent_width = parent.winfo_width()
+        parent_height = parent.winfo_height()
+        x = parent_x + (parent_width // 2) - (width // 2)
+        y = parent_y + (parent_height // 2) - (height // 2)
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+        
+        # Content frame
+        content_frame = ttk.Frame(dialog)
+        content_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Help text
+        text_widget = tk.Text(
+            content_frame,
+            wrap=tk.WORD,
+            font=("Segoe UI", 10),
+            bg="#f8f9fa",
+            relief=tk.FLAT,
+            padx=10,
+            pady=10
+        )
+        text_widget.pack(fill=tk.BOTH, expand=True)
+        text_widget.insert(1.0, help_text.strip())
+        text_widget.config(state=tk.DISABLED)
+        
+        # Scrollbar
+        scrollbar = ttk.Scrollbar(content_frame, orient=tk.VERTICAL, command=text_widget.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        text_widget.configure(yscrollcommand=scrollbar.set)
+        
+        # Close button
+        button_frame = ttk.Frame(content_frame)
+        button_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        ttk.Button(
+            button_frame,
+            text="Close",
+            command=dialog.destroy
+        ).pack(side=tk.RIGHT)
