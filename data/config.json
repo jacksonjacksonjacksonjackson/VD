@@ -1,5 +1,5 @@
 {
-    "window_size": "1400x771",
+    "window_size": "1400x900",
     "max_threads": 10,
     "visible_columns": [
         "VIN",
@@ -10,6 +10,10 @@
         "BodyClass",
         "MPG Combined",
         "CO2 emissions",
+        "Commercial Category",
+        "GVWR (lbs)",
+        "Data Quality",
+        "Processing Status",
         "Annual Mileage",
         "Asset ID"
     ],

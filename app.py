@@ -127,8 +127,15 @@ def run_gui_mode(args):
     logger = logging.getLogger(__name__)
     logger.info(f"Starting {APP_NAME} v{APP_VERSION} in GUI mode")
     
-    # Create root window
-    root = tk.Tk()
+    # Create root window with drag-and-drop support if available
+    try:
+        from tkinterdnd2 import TkinterDnD
+        root = TkinterDnD.Tk()
+        logger.info("Drag-and-drop support enabled")
+    except ImportError:
+        root = tk.Tk()
+        logger.warning("Drag-and-drop support not available (tkinterdnd2 not installed)")
+    
     root.title(f"{APP_NAME} v{APP_VERSION}")
     root.geometry(DEFAULT_WINDOW_SIZE)
     

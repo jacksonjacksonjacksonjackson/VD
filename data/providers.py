@@ -12,6 +12,7 @@ import xml.etree.ElementTree as ET
 import logging
 from typing import Dict, List, Any, Optional, Union, Tuple
 from urllib.parse import quote
+import re
 
 from settings import (
     NHTSA_BASE_URL, 
@@ -33,6 +34,15 @@ from data.models import (
 
 # Set up module logger
 logger = logging.getLogger(__name__)
+
+# === DIAGNOSTIC LOGGING FOR DEBUGGING ===
+diagnostic_logger = logging.getLogger("diagnostic")
+diagnostic_logger.setLevel(logging.DEBUG)
+if not diagnostic_logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('DIAGNOSTIC: %(message)s')
+    handler.setFormatter(formatter)
+    diagnostic_logger.addHandler(handler)
 
 ###############################################################################
 # API Clients
@@ -144,7 +154,10 @@ class VinDecoderClient(BaseApiClient):
         Returns:
             VinDecoderResponse object with results or error
         """
+        diagnostic_logger.info(f"=== VIN DECODE START: {vin} ===")
+        
         if not vin:
+            diagnostic_logger.error(f"VIN DECODE FAILED: Empty VIN provided")
             return VinDecoderResponse(
                 success=False,
                 error_message="VIN cannot be empty",
@@ -155,16 +168,18 @@ class VinDecoderClient(BaseApiClient):
         cache_key = f"vin_{vin}"
         cached_data = self._get_from_cache(cache_key)
         if cached_data:
-            logger.debug(f"Using cached data for VIN {vin}")
+            diagnostic_logger.info(f"VIN DECODE CACHE HIT: {vin}")
             return cached_data
         
         # Build URL
         url = f"{NHTSA_BASE_URL}{quote(vin)}?format=json"
+        diagnostic_logger.info(f"VIN DECODE API REQUEST: {url}")
         
         # Make request
         success, response, error = self._make_request(url)
         
         if not success:
+            diagnostic_logger.error(f"VIN DECODE API FAILED: {vin} - {error}")
             return VinDecoderResponse(
                 success=False,
                 error_message=error,
@@ -174,9 +189,13 @@ class VinDecoderClient(BaseApiClient):
         # Parse response
         try:
             data = response.json()
+            diagnostic_logger.info(f"VIN DECODE API SUCCESS: {vin} - Response received")
+            diagnostic_logger.debug(f"VIN DECODE RAW RESPONSE: {vin} - {data}")
+            
             results = data.get("Results", [])
             
             if not results:
+                diagnostic_logger.error(f"VIN DECODE NO RESULTS: {vin} - API returned empty results")
                 return VinDecoderResponse(
                     success=False,
                     error_message="No results returned from API",
@@ -185,13 +204,18 @@ class VinDecoderClient(BaseApiClient):
             
             # NHTSA API returns a list, but we only need the first item
             result = results[0]
+            diagnostic_logger.debug(f"VIN DECODE FIRST RESULT: {vin} - {result}")
             
             # Check if we got essential data
             year = result.get("ModelYear", "").strip()
             make = result.get("Make", "").strip()
             model = result.get("Model", "").strip()
             
+            diagnostic_logger.info(f"VIN DECODE EXTRACTED DATA: {vin} - Year: '{year}', Make: '{make}', Model: '{model}'")
+            
             if not (year and make and model):
+                diagnostic_logger.error(f"VIN DECODE INCOMPLETE DATA: {vin} - Missing essential fields")
+                diagnostic_logger.error(f"VIN DECODE MISSING: Year='{year}', Make='{make}', Model='{model}'")
                 return VinDecoderResponse(
                     success=False,
                     error_message="Incomplete vehicle data returned",
@@ -199,19 +223,22 @@ class VinDecoderClient(BaseApiClient):
                     data=result
                 )
             
-            # Success
-            response_obj = VinDecoderResponse(
+            # Success - create response
+            vin_response = VinDecoderResponse(
                 success=True,
                 vin=vin,
                 data=result
             )
             
-            # Cache the result
-            self._save_to_cache(cache_key, response_obj)
+            diagnostic_logger.info(f"VIN DECODE SUCCESS: {vin} - Complete data received")
             
-            return response_obj
+            # Cache successful response
+            self._save_to_cache(cache_key, vin_response)
+            
+            return vin_response
             
         except Exception as e:
+            diagnostic_logger.error(f"VIN DECODE PARSING ERROR: {vin} - {e}")
             logger.error(f"Error parsing VIN decoder response: {e}")
             return VinDecoderResponse(
                 success=False,
@@ -458,119 +485,192 @@ class FuelEconomyClient(BaseApiClient):
     def find_vehicle_matches(self, year: str, make: str, model: str, 
                           engine_disp: str = None) -> List[Dict[str, str]]:
         """
-        Find matching vehicles in the FuelEconomy.gov database.
+        Find vehicle matches in the FuelEconomy.gov database.
         
         Args:
-            year: Vehicle model year
-            make: Vehicle manufacturer
-            model: Vehicle model
+            year: Model year
+            make: Manufacturer
+            model: Model name
             engine_disp: Engine displacement (optional)
             
         Returns:
             List of matching vehicle options
         """
-        if not year or not make or not model:
-            logger.warning("Missing required vehicle information")
+        diagnostic_logger.info(f"=== FUEL ECONOMY SEARCH START ===")
+        diagnostic_logger.info(f"SEARCH CRITERIA: Year='{year}', Make='{make}', Model='{model}', Engine='{engine_disp}'")
+        
+        # Step 1: Get available models for this year and make
+        diagnostic_logger.info(f"STEP 1: Fetching available models for {year} {make}")
+        available_models = self.fetch_menu("model", {"year": year, "make": make})
+        diagnostic_logger.info(f"AVAILABLE MODELS COUNT: {len(available_models)}")
+        
+        if not available_models:
+            diagnostic_logger.error(f"NO MODELS FOUND: Year='{year}', Make='{make}'")
             return []
         
-        # Find matching make
-        makes = self.fetch_menu("make", params={"year": year})
-        matched_make = None
+        # Log available models for debugging
+        for i, model_item in enumerate(available_models[:5]):
+            diagnostic_logger.debug(f"AVAILABLE MODEL {i+1}: {model_item}")
         
-        for m in makes:
-            if case_insensitive_equal(m["text"], make):
-                matched_make = m["text"]
-                break
+        # Step 2: Find the best matching model
+        diagnostic_logger.info(f"STEP 2: Finding best model match for '{model}'")
+        best_model_match = self._find_best_model_match(available_models, model)
         
-        if not matched_make:
-            logger.warning(f"Make '{make}' not found for year {year}")
+        if not best_model_match:
+            diagnostic_logger.warning(f"NO MODEL MATCH FOUND for '{model}'")
+            diagnostic_logger.warning(f"AVAILABLE MODELS:")
+            for model_item in available_models[:10]:
+                diagnostic_logger.warning(f"  AVAILABLE: {model_item.get('text', '')}")
             return []
         
-        # Find matching models
-        models_list = self.fetch_menu("model", params={"year": year, "make": matched_make})
-        if not models_list:
-            logger.warning(f"No models found for {matched_make} {year}")
+        diagnostic_logger.info(f"BEST MODEL MATCH: {best_model_match}")
+        
+        # Step 3: Get vehicle options for the matched model
+        diagnostic_logger.info(f"STEP 3: Fetching vehicle options")
+        options = self.fetch_menu("options", {
+            "year": year, 
+            "make": make, 
+            "model": best_model_match["value"]
+        })
+        diagnostic_logger.info(f"VEHICLE OPTIONS COUNT: {len(options)}")
+        
+        if not options:
+            diagnostic_logger.error(f"NO OPTIONS FROM API: Year='{year}', Make='{make}', Model='{best_model_match['value']}'")
             return []
         
-        # Normalize the search model name
-        normalized_model = normalize_vehicle_model(model)
+        # Log first few options for debugging
+        for i, option in enumerate(options[:5]):
+            diagnostic_logger.debug(f"OPTION {i+1}: {option}")
         
-        # Find model matches (exact or partial)
-        exact_matches = [m for m in models_list 
-                        if normalize_vehicle_model(m["text"]) == normalized_model]
-        
-        if exact_matches:
-            matched_models = exact_matches
+        # Step 4: Filter by engine displacement if specified
+        if engine_disp:
+            diagnostic_logger.info(f"STEP 4: Filtering by engine displacement '{engine_disp}'")
+            filtered_options = self._filter_options_by_engine(options, engine_disp)
+            diagnostic_logger.info(f"FILTERED OPTIONS COUNT: {len(filtered_options)}")
+            
+            if not filtered_options:
+                diagnostic_logger.warning(f"NO MATCHES AFTER ENGINE FILTERING: Engine='{engine_disp}'")
+                diagnostic_logger.warning(f"AVAILABLE OPTIONS:")
+                for option in options[:5]:
+                    diagnostic_logger.warning(f"  AVAILABLE: {option.get('text', '')}")
+                # Return all options if no engine match
+                return options
+            return filtered_options
         else:
-            matched_models = [m for m in models_list 
-                            if normalized_model in normalize_vehicle_model(m["text"])]
-        
-        if not matched_models:
-            logger.warning(f"Model '{model}' not found for {matched_make} {year}")
-            return []
-        
-        # Collect all options for matching models
-        all_options = []
-        
-        for mm in matched_models:
-            options = self.fetch_menu("options", params={
-                "year": year, 
-                "make": matched_make, 
-                "model": mm["text"]
-            })
-            
-            if not options:
-                continue
-            
-            # Filter options by model and engine displacement
-            filtered_options = self._filter_options(options, model, engine_disp)
-            all_options.extend(filtered_options)
-        
-        # Remove duplicates
-        seen_values = set()
-        unique_options = []
-        
-        for opt in all_options:
-            if opt["value"] not in seen_values:
-                unique_options.append(opt)
-                seen_values.add(opt["value"])
-        
-        return unique_options
+            diagnostic_logger.info(f"STEP 4: No engine filtering - returning all options")
+            return options
     
-    def _filter_options(self, options: List[Dict[str, str]], model: str, 
-                       engine_disp: Optional[str] = None) -> List[Dict[str, str]]:
+
+    
+    def _find_best_model_match(self, available_models: List[Dict[str, str]], target_model: str) -> Optional[Dict[str, str]]:
         """
-        Filter vehicle options by model and engine displacement.
+        Find the best matching model from available models.
         
         Args:
-            options: List of options to filter
-            model: Model to match
-            engine_disp: Engine displacement to match (optional)
+            available_models: List of available models from API
+            target_model: Target model name to match
+            
+        Returns:
+            Best matching model or None if no match found
+        """
+        if not available_models or not target_model:
+            return None
+        
+        target_normalized = normalize_vehicle_model(target_model).lower()
+        diagnostic_logger.info(f"NORMALIZED TARGET MODEL: '{target_normalized}'")
+        
+        # Try exact match first
+        for model in available_models:
+            model_value = model.get("value", "").lower()
+            model_text = model.get("text", "").lower()
+            
+            if target_normalized == model_value or target_normalized == model_text:
+                diagnostic_logger.info(f"EXACT MATCH FOUND: {model}")
+                return model
+        
+        # Try partial match
+        best_match = None
+        best_score = 0
+        
+        for model in available_models:
+            model_value = model.get("value", "").lower()
+            model_text = model.get("text", "").lower()
+            
+            score = 0
+            
+            # Check if target is in model name
+            if target_normalized in model_value:
+                score += 10
+            if target_normalized in model_text:
+                score += 8
+            
+            # Check if model name is in target (for cases like "F-150" vs "F150")
+            if model_value in target_normalized:
+                score += 6
+            if model_text in target_normalized:
+                score += 4
+            
+            # Prefer shorter matches (less specific variants)
+            if score > 0:
+                score -= len(model_text) * 0.1
+            
+            diagnostic_logger.debug(f"MODEL SCORE: '{model_text}' = {score}")
+            
+            if score > best_score:
+                best_score = score
+                best_match = model
+        
+        if best_match:
+            diagnostic_logger.info(f"BEST PARTIAL MATCH: {best_match} (score: {best_score})")
+        else:
+            diagnostic_logger.warning(f"NO MODEL MATCH FOUND for '{target_model}'")
+        
+        return best_match
+    
+    def _filter_options_by_engine(self, options: List[Dict[str, str]], engine_disp: str) -> List[Dict[str, str]]:
+        """
+        Filter vehicle options by engine displacement.
+        
+        Args:
+            options: List of vehicle options
+            engine_disp: Engine displacement to match
             
         Returns:
             Filtered list of options
         """
-        # Normalize the model name for comparison
-        normalized_model = normalize_vehicle_model(model)
+        if not engine_disp:
+            return options
         
-        # Filter by model first
-        model_filtered = [o for o in options 
-                         if normalized_model in normalize_vehicle_model(o["text"])]
+        diagnostic_logger.info(f"FILTERING BY ENGINE: '{engine_disp}'")
+        filtered = []
         
-        # If no matches, return original options
-        if not model_filtered:
-            model_filtered = options
+        # Normalize engine displacement for matching
+        engine_normalized = engine_disp.lower().replace(" ", "")
         
-        # Filter by engine displacement if provided
-        if engine_disp:
-            disp_str = engine_disp.lower()
-            disp_filtered = [o for o in model_filtered if disp_str in o["text"].lower()]
+        for option in options:
+            option_text = option.get("text", "").lower()
             
-            # Return displacement-filtered results if any, otherwise keep model filtered
-            if disp_filtered:
-                return disp_filtered
+            # Check for direct match
+            if engine_disp.lower() in option_text:
+                diagnostic_logger.debug(f"ENGINE MATCH: '{engine_disp}' found in '{option_text}'")
+                filtered.append(option)
+                continue
+            
+            # Check for normalized match (e.g., "2.0L" vs "2.0 L")
+            if engine_normalized in option_text.replace(" ", ""):
+                diagnostic_logger.debug(f"ENGINE NORMALIZED MATCH: '{engine_normalized}' found in '{option_text}'")
+                filtered.append(option)
+                continue
+            
+            # Check for displacement patterns (e.g., "2.0" in "2.0 L, Turbo")
+            import re
+            engine_pattern = re.escape(engine_disp.replace("L", "").replace("l", "").strip())
+            if re.search(rf"{engine_pattern}\s*l", option_text, re.IGNORECASE):
+                diagnostic_logger.debug(f"ENGINE PATTERN MATCH: '{engine_pattern}' found in '{option_text}'")
+                filtered.append(option)
         
-        return model_filtered
+        diagnostic_logger.info(f"ENGINE FILTERING RESULT: {len(filtered)} matches from {len(options)} options")
+        return filtered
     
     def pick_best_match(self, options: List[Dict[str, str]], year: str, make: str, 
                       model: str, engine_disp: Optional[str] = None) -> Optional[Dict[str, str]]:
@@ -661,15 +761,23 @@ class VehicleDataProvider:
         Returns:
             Tuple of (success, data, error_message)
         """
+        diagnostic_logger.info(f"=== VEHICLE DATA PIPELINE START: {vin} ===")
+        
         # Step 1: Decode VIN
+        diagnostic_logger.info(f"STEP 1 - VIN DECODING: {vin}")
         vin_response = self.vin_client.decode_vin(vin)
         
         if not vin_response.success:
+            diagnostic_logger.error(f"PIPELINE FAILED AT STEP 1: {vin} - {vin_response.error_message}")
             return False, {}, vin_response.error_message
         
         vehicle_id = vin_response.to_vehicle_id()
+        diagnostic_logger.info(f"STEP 1 SUCCESS: {vin} - {vehicle_id.year} {vehicle_id.make} {vehicle_id.model}")
         
         # Step 2: Find matching vehicles in FuelEconomy.gov
+        diagnostic_logger.info(f"STEP 2 - FUEL ECONOMY MATCHING: {vin}")
+        diagnostic_logger.info(f"MATCHING CRITERIA: Year='{vehicle_id.year}', Make='{vehicle_id.make}', Model='{vehicle_id.model}', Engine='{vehicle_id.engine_displacement}'")
+        
         options = self.fe_client.find_vehicle_matches(
             year=vehicle_id.year,
             make=vehicle_id.make,
@@ -677,8 +785,14 @@ class VehicleDataProvider:
             engine_disp=vehicle_id.engine_displacement
         )
         
+        diagnostic_logger.info(f"FUEL ECONOMY MATCHES FOUND: {vin} - {len(options)} options")
+        if options:
+            for i, option in enumerate(options[:3]):  # Log first 3 matches
+                diagnostic_logger.debug(f"MATCH OPTION {i+1}: {option}")
+        
         # No matches found
         if not options:
+            diagnostic_logger.warning(f"STEP 2 NO MATCHES: {vin} - No fuel economy data found")
             # Return basic data from VIN decoder without fuel economy
             return True, {
                 "vin": vin,
@@ -690,6 +804,7 @@ class VehicleDataProvider:
             }, "No matching vehicles found in fuel economy database"
         
         # Step 3: Pick best match
+        diagnostic_logger.info(f"STEP 3 - BEST MATCH SELECTION: {vin}")
         best_match = self.fe_client.pick_best_match(
             options=options,
             year=vehicle_id.year,
@@ -701,11 +816,16 @@ class VehicleDataProvider:
         # Use first option if no best match found
         if not best_match:
             best_match = options[0]
+            diagnostic_logger.warning(f"STEP 3 FALLBACK: {vin} - Using first option as best match")
+        
+        diagnostic_logger.info(f"STEP 3 BEST MATCH: {vin} - ID='{best_match['value']}', Text='{best_match['text']}'")
         
         # Step 4: Get detailed fuel economy data
+        diagnostic_logger.info(f"STEP 4 - FUEL ECONOMY DETAILS: {vin}")
         fe_response = self.fe_client.fetch_vehicle_details(best_match["value"])
         
         if not fe_response.success:
+            diagnostic_logger.error(f"STEP 4 FAILED: {vin} - {fe_response.error_message}")
             # Return basic data without fuel economy
             return True, {
                 "vin": vin,
@@ -717,12 +837,17 @@ class VehicleDataProvider:
             }, f"Error retrieving fuel economy data: {fe_response.error_message}"
         
         # Step 5: Combine all data
+        diagnostic_logger.info(f"STEP 5 - DATA COMBINATION: {vin}")
         fuel_economy = fe_response.to_fuel_economy()
         
         # Calculate match confidence
         match_confidence = self._calculate_match_confidence(
             vehicle_id, fuel_economy.raw_data, best_match["text"]
         )
+        
+        diagnostic_logger.info(f"FINAL MATCH CONFIDENCE: {vin} - {match_confidence}%")
+        diagnostic_logger.info(f"FINAL MPG DATA: {vin} - Combined: {fuel_economy.combined_mpg}, City: {fuel_economy.city_mpg}, Highway: {fuel_economy.highway_mpg}")
+        diagnostic_logger.info(f"=== VEHICLE DATA PIPELINE SUCCESS: {vin} ===")
         
         # Return complete data
         return True, {
@@ -803,12 +928,24 @@ class VehicleDataProvider:
         if vehicle_id.engine_displacement:
             fe_displ = fe_data.get("displ", "")
             try:
-                vin_displ = float(vehicle_id.engine_displacement)
-                fe_displ_val = float(fe_displ)
+                # Try to extract numeric value from engine displacement
+                # Handle formats like "361/479", "5.0L", "350", etc.
+                vin_displ_str = str(vehicle_id.engine_displacement).strip()
+                fe_displ_str = str(fe_displ).strip()
                 
-                if abs(vin_displ - fe_displ_val) < 0.1:
-                    score += 5.0
-            except (ValueError, TypeError):
+                # Extract first numeric value for comparison
+                vin_match = re.search(r'(\d+\.?\d*)', vin_displ_str)
+                fe_match = re.search(r'(\d+\.?\d*)', fe_displ_str)
+                
+                if vin_match and fe_match:
+                    vin_displ = float(vin_match.group(1))
+                    fe_displ_val = float(fe_match.group(1))
+                    
+                    if abs(vin_displ - fe_displ_val) < 0.1:
+                        score += 5.0
+            except (ValueError, TypeError, AttributeError) as e:
+                # Log but don't fail - displacement comparison is optional
+                logger.debug(f"Could not compare engine displacements: VIN '{vehicle_id.engine_displacement}' vs FE '{fe_displ}': {e}")
                 pass
         
         # Cylinders match

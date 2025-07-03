@@ -15,6 +15,13 @@ from typing import Dict, List, Any, Optional, Callable, Tuple
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, Menu
 
+# Import drag-and-drop support
+try:
+    from tkinterdnd2 import TkinterDnD
+    DRAG_DROP_AVAILABLE = True
+except ImportError:
+    DRAG_DROP_AVAILABLE = False
+
 # Import settings and utilities
 from settings import (
     APP_NAME,
@@ -57,7 +64,7 @@ class MainWindow:
         Initialize the main window.
         
         Args:
-            root: Root Tkinter window
+            root: Root Tkinter window (may be TkinterDnD.Tk for drag-and-drop support)
         """
         self.root = root
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -92,7 +99,7 @@ class MainWindow:
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
         
         # Set initial status
-        self.status_bar.set("Ready")
+        self.status_bar.set("Ready - Drag & Drop CSV files or use Browse")
         self.status_bar.set(f"Version {APP_VERSION}", section="version")
         self.status_bar.set("No vehicles loaded", section="vehicle_count")
         
@@ -109,7 +116,8 @@ class MainWindow:
         self._bind_events()
         
         # Log startup
-        logger.info(f"{APP_NAME} v{APP_VERSION} started")
+        drag_status = "with" if DRAG_DROP_AVAILABLE else "without"
+        logger.info(f"{APP_NAME} v{APP_VERSION} started {drag_status} drag-and-drop support")
     
     def _create_styles(self):
         """Create custom styles for widgets."""
@@ -942,28 +950,88 @@ VINs,Odometer,Department,Location
             self.process_panel.update_progress(current, total)
         
         def done_callback(vehicles):
-            # Update processing state
-            self.processing = False
+            # Add detailed logging
+            logger.info(f"🔧 DEBUG: done_callback received {len(vehicles)} vehicles")
+            logger.info(f"🔧 DEBUG: done_callback called from thread: {threading.current_thread().name}")
+            logger.info(f"🔧 DEBUG: Main thread check: {threading.current_thread() == threading.main_thread()}")
             
-            # Update fleet
-            self.fleet = Fleet(
-                name=f"Fleet Analysis - {time.strftime('%Y-%m-%d')}",
-                vehicles=vehicles,
-                creation_date=datetime.datetime.now(),
-                last_modified=datetime.datetime.now()
-            )
-            
-            # Update UI
-            self.results_panel.set_data(vehicles)
-            self.analysis_panel.set_fleet(self.fleet)
-            self.update_vehicle_count()
-            
-            # Update status
-            self.status_bar.set(f"Processing complete. {len(vehicles)} vehicles processed.")
-            
-            # Switch to results tab if there are vehicles
-            if vehicles:
-                self.notebook.select(1)  # Results tab
+            try:
+                # Update processing state
+                self.processing = False
+                
+                # Log vehicle details for debugging
+                success_count = sum(1 for v in vehicles if v.processing_success)
+                failed_count = len(vehicles) - success_count
+                logger.info(f"🔧 DEBUG: Vehicle breakdown - Success: {success_count}, Failed: {failed_count}")
+                
+                if failed_count > 0:
+                    logger.info(f"🔧 DEBUG: First few failed vehicles:")
+                    for i, v in enumerate([v for v in vehicles if not v.processing_success][:3]):
+                        logger.info(f"🔧 DEBUG: Failed vehicle {i+1}: VIN={v.vin}, Error='{v.processing_error}'")
+                
+                # Log fleet creation attempt
+                logger.info(f"🔧 DEBUG: Creating Fleet object...")
+                self.fleet = Fleet(
+                    name=f"Fleet Analysis - {time.strftime('%Y-%m-%d')}",
+                    vehicles=vehicles,
+                    creation_date=datetime.datetime.now(),
+                    last_modified=datetime.datetime.now()
+                )
+                logger.info(f"🔧 DEBUG: Fleet created successfully with {len(vehicles)} vehicles")
+                
+                # UI updates - ensure they happen on main thread
+                def update_ui():
+                    try:
+                        logger.info(f"🔧 DEBUG: Starting UI updates on thread: {threading.current_thread().name}")
+                        
+                        # Update results panel
+                        logger.info(f"🔧 DEBUG: Calling results_panel.set_data() with {len(vehicles)} vehicles")
+                        self.results_panel.set_data(vehicles)
+                        logger.info(f"🔧 DEBUG: results_panel.set_data() completed")
+                        
+                        # Update analysis panel
+                        logger.info(f"🔧 DEBUG: Calling analysis_panel.set_fleet()")
+                        self.analysis_panel.set_fleet(self.fleet)
+                        logger.info(f"🔧 DEBUG: analysis_panel.set_fleet() completed")
+                        
+                        # Update vehicle count
+                        logger.info(f"🔧 DEBUG: Updating vehicle count")
+                        self.update_vehicle_count()
+                        
+                        # Update status
+                        status_msg = f"Processing complete. {len(vehicles)} vehicles processed."
+                        logger.info(f"🔧 DEBUG: Setting status: {status_msg}")
+                        self.status_bar.set(status_msg)
+                        
+                        # Switch to results tab if there are vehicles
+                        if vehicles:
+                            logger.info(f"🔧 DEBUG: Switching to results tab (notebook.select(1))")
+                            self.notebook.select(1)  # Results tab
+                            logger.info(f"🔧 DEBUG: Successfully switched to results tab")
+                        else:
+                            logger.warning(f"🔧 DEBUG: No vehicles to display, staying on process tab")
+                        
+                        logger.info(f"🔧 DEBUG: All UI updates completed successfully")
+                        
+                    except Exception as ui_e:
+                        logger.error(f"🔧 DEBUG: Exception in UI update: {ui_e}")
+                        logger.error(f"🔧 DEBUG: UI update exception type: {type(ui_e).__name__}")
+                        import traceback
+                        logger.error(f"🔧 DEBUG: UI update traceback: {traceback.format_exc()}")
+                
+                # Schedule UI update on main thread if we're not on it
+                if threading.current_thread() == threading.main_thread():
+                    logger.info(f"🔧 DEBUG: Already on main thread, updating UI directly")
+                    update_ui()
+                else:
+                    logger.info(f"🔧 DEBUG: Not on main thread, scheduling UI update via root.after()")
+                    self.root.after(0, update_ui)
+                
+            except Exception as e:
+                logger.error(f"🔧 DEBUG: Exception in done_callback: {e}")
+                logger.error(f"🔧 DEBUG: done_callback exception type: {type(e).__name__}")
+                import traceback
+                logger.error(f"🔧 DEBUG: done_callback traceback: {traceback.format_exc()}")
         
         # Start processing
         self.processor.process_file(
