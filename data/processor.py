@@ -987,7 +987,6 @@ class ProcessingPipeline:
             vehicle.vehicle_id.year = "N/A"
         
         # Add timestamp for when the error occurred
-        import datetime
         vehicle.processing_date = datetime.datetime.now()
         
         return vehicle
@@ -1200,7 +1199,6 @@ class ProcessingPipeline:
             elif standard_field == "acquisition_date":
                 # Try to parse date
                 try:
-                    import datetime
                     # Support common date formats
                     for fmt in ["%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%Y/%m/%d"]:
                         try:
@@ -1215,7 +1213,6 @@ class ProcessingPipeline:
             elif standard_field == "retire_date":
                 # Try to parse date
                 try:
-                    import datetime
                     for fmt in ["%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%Y/%m/%d"]:
                         try:
                             vehicle.retire_date = datetime.datetime.strptime(value, fmt).date()
