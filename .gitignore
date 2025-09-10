@@ -58,5 +58,6 @@ coverage.xml
 # Project specific
 data/raw/
 data/processed/
+data/exports/
 outputs/
 temp/ 

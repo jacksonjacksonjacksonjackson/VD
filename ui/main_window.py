@@ -876,11 +876,20 @@ Additional columns will be preserved and can include:
 - Department: Vehicle department assignment
 - Location: Vehicle location information
 - Asset ID: Asset tracking number
+- Annual Mileage: Expected annual mileage
 
 Example:
-VINs,Odometer,Department,Location
-1FTFW1ET5DFA92312,45000,Maintenance,North Depot
-2FMDK3JC4NBA12345,15200,Admin,Headquarters
+VINs,Odometer,Department,Location,Annual_Mileage
+1FTFW1ET5DFA92312,45000,Maintenance,North Depot,15000
+2FMDK3JC4NBA12345,15200,Admin,Headquarters,8000
+
+Commercial Vehicle Enhancement:
+The system now automatically detects commercial vehicles (Class 3-8) and
+enhances data through intelligent web scraping to provide:
+- Payload and towing capacities
+- Duty cycle classification
+- Electrification suitability assessment
+- Detailed specifications for fleet planning
         """
         
         format_label = ttk.Label(
@@ -890,6 +899,46 @@ VINs,Odometer,Department,Location
             justify=tk.LEFT
         )
         format_label.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Commercial Vehicle Features section
+        commercial_frame = ttk.Frame(doc_notebook)
+        doc_notebook.add(commercial_frame, text="Commercial Features")
+        
+        commercial_text = """
+Commercial Vehicle Analysis:
+
+Enhanced Data Collection:
+The system automatically detects commercial vehicles (GVWR > 8,500 lbs) and 
+uses intelligent web scraping to gather comprehensive specifications including:
+
+• Payload Capacity: Maximum cargo weight capacity
+• Towing Capacity: Maximum trailer weight capacity
+• Duty Cycle: Operational classification (Urban, Regional, Long Haul, etc.)
+• Electrification Suitability: Assessment for EV conversion potential
+
+Key Commercial Classifications:
+• Light Duty: ≤8,500 lbs GVWR (pickup trucks, small vans)
+• Medium Duty: 8,501-19,500 lbs GVWR (box trucks, large vans)
+• Heavy Duty: 19,501-33,000 lbs GVWR (delivery trucks, buses)
+• Extra Heavy Duty: >33,000 lbs GVWR (semi-trucks, large buses)
+
+Electrification Assessment:
+The system evaluates each commercial vehicle's potential for electrification
+based on duty cycle, range requirements, and operational patterns to help
+prioritize fleet electrification planning.
+
+Data Sources:
+Information is gathered from manufacturer websites, government databases,
+and industry sources to ensure comprehensive and accurate specifications.
+        """
+        
+        commercial_label = ttk.Label(
+            commercial_frame, 
+            text=commercial_text,
+            wraplength=550,
+            justify=tk.LEFT
+        )
+        commercial_label.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
         # Close button
         ttk.Button(
