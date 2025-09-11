@@ -15,7 +15,7 @@ from typing import Dict, Any
 # Application Information
 ###############################################################################
 APP_NAME = "Fleet Electrification Analyzer"
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.0.1"
 APP_DESCRIPTION = "A tool for analyzing fleet vehicles and planning electrification strategies"
 APP_AUTHOR = "Fleet Analytics"
 
@@ -64,10 +64,93 @@ RETRY_DELAY = 1.0  # seconds
 RATE_LIMIT_DELAY = 0.1  # seconds between API calls
 
 ###############################################################################
-# Threading Configuration
+# Threading Configuration (Optimized for Commercial Vehicle Processing)
 ###############################################################################
-MAX_THREADS = 10  # Default maximum threads for parallel processing
-MAX_QUEUE_SIZE = 1000  # Maximum size of processing queue
+MAX_THREADS = 8   # Reduced for stability with web scraping
+MAX_QUEUE_SIZE = 500  # Reduced queue size for better memory management
+
+# Advanced threading settings
+THREADING_CONFIG = {
+    "core_threads": 4,              # Core processing threads (non-scraping)
+    "scraping_threads": 2,          # Dedicated scraping threads
+    "io_threads": 2,                # File I/O and database operations
+    "batch_size": 50,               # VINs processed per batch
+    "scraping_batch_size": 5,       # VINs scraped per batch
+    "timeout_seconds": 300,         # Total processing timeout
+    "memory_limit_mb": 512,         # Memory usage limit
+}
+
+###############################################################################
+# Commercial Vehicle Web Scraping Configuration
+###############################################################################
+# Scraping behavior settings
+SCRAPING_CONFIG = {
+    # Browser simulation
+    "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "request_timeout": 12,           # Increased timeout for stability
+    "selenium_timeout": 20,          # Increased Selenium timeout
+    
+    # Rate limiting (production-friendly)
+    "rate_limit_delay": 1.5,         # Conservative delay between requests
+    "max_retries": 2,                # Reduced retries for faster processing
+    "backoff_factor": 1.5,           # Exponential backoff multiplier
+    
+    # Caching strategy
+    "cache_expiry_hours": 336,       # Extended cache (2 weeks) for stability
+    "cache_cleanup_interval": 24,    # Hours between cache cleanup
+    "max_cache_size_mb": 100,        # Cache size limit
+    
+    # Quality and performance
+    "confidence_threshold": 0.65,    # Slightly lower for more data
+    "enable_scraping": True,         # Global scraping enable/disable
+    "use_selenium": False,           # Prefer requests for better performance
+    "max_concurrent_scrapes": 2,     # Reduced for politeness
+    "scraping_batch_size": 5,        # Process in small batches
+    
+    # Fallback behavior
+    "enable_estimates": True,        # Allow estimated specs when scraping fails
+    "estimation_confidence": 0.5,    # Confidence for estimated values
+    "graceful_degradation": True,    # Continue processing if scraping fails
+}
+
+###############################################################################
+# Commercial Vehicle Help Documentation
+###############################################################################
+# Contextual help text for commercial vehicle features
+COMMERCIAL_VEHICLE_HELP = {
+    "Commercial Category": "Classification based on GVWR: Light Duty (≤8,500 lbs), Medium Duty (8,501-19,500 lbs), Heavy Duty (19,501-33,000 lbs), Extra Heavy Duty (>33,000 lbs)",
+    "GVWR (lbs)": "Gross Vehicle Weight Rating - maximum allowable total weight of vehicle including cargo, passengers, and fluids",
+    "payload_capacity_lbs": "Maximum weight of cargo that can be carried (GVWR minus curb weight)",
+    "towing_capacity_lbs": "Maximum weight the vehicle can safely tow behind it",
+    "duty_cycle": "Operational classification: Urban Delivery, Regional Haul, Long Haul, Construction, Emergency Services, etc.",
+    "electrification_suitability": "Assessment of how suitable this vehicle is for electrification: High, Medium, Low based on operational patterns",
+    "gcwr_lbs": "Gross Combined Weight Rating - maximum total weight of vehicle plus trailer",
+    "front_gawr_lbs": "Front Gross Axle Weight Rating - maximum weight on front axle",
+    "rear_gawr_lbs": "Rear Gross Axle Weight Rating - maximum weight on rear axle",
+    "engine_torque_lb_ft": "Engine torque output in pound-feet - indicates pulling power",
+    "vocation": "Specific vehicle application or use case (delivery, construction, passenger transport, etc.)",
+    "cab_configuration": "Cab style: Regular (single row), Extended (partial second row), Crew (full second row)",
+    "bed_length": "Truck bed length classification: Short, Standard, Long",
+    "axle_configuration": "Drive configuration: 4x2 (2WD), 4x4 (4WD), 6x4 (6-wheel with 4 driven), etc.",
+    "wheelbase_inches": "Distance between front and rear axle centers - affects ride quality and cargo space",
+    "overall_length_inches": "Total vehicle length from front bumper to rear",
+    "cargo_length_inches": "Usable cargo area length",
+    "fuel_tank_capacity_gal": "Total fuel tank capacity in gallons",
+    "def_tank_capacity_gal": "Diesel Exhaust Fluid tank capacity for emissions control systems"
+}
+
+###############################################################################
+# Cache Management Configuration
+###############################################################################
+# Intelligent cache settings for optimal performance
+CACHE_CONFIG = {
+    "auto_cleanup_enabled": True,     # Automatically clean old cache entries
+    "cleanup_on_startup": True,       # Clean cache when app starts
+    "max_entries": 10000,            # Maximum cache entries before cleanup
+    "compression_enabled": True,      # Compress cache data
+    "memory_cache_size": 1000,       # In-memory cache entries
+    "disk_cache_fallback": True,     # Use disk when memory is full
+}
 
 ###############################################################################
 # Vehicle Matching Parameters
@@ -182,7 +265,37 @@ COLUMN_NAME_MAP = {
     "Trim": "Trim Level",
     "Is Diesel": "Diesel Engine",
     "Is Commercial": "Commercial Vehicle",
-    "Commercial Summary": "Commercial Summary"
+    "Commercial Summary": "Commercial Summary",
+    
+    # Enhanced Commercial Vehicle Specifications (from web scraping)
+    "payload_capacity_lbs": "Payload Capacity (lbs)",
+    "towing_capacity_lbs": "Towing Capacity (lbs)",
+    "gcwr_lbs": "GCWR (lbs)",
+    "front_gawr_lbs": "Front GAWR (lbs)",
+    "rear_gawr_lbs": "Rear GAWR (lbs)",
+    "engine_torque_lb_ft": "Engine Torque (lb-ft)",
+    "engine_torque_rpm": "Torque RPM",
+    "max_hp_rpm": "Max HP RPM",
+    "engine_manufacturer": "Engine Manufacturer",
+    "engine_model": "Engine Model",
+    "fuel_tank_capacity_gal": "Fuel Tank (gal)",
+    "def_tank_capacity_gal": "DEF Tank (gal)",
+    "wheelbase_inches": "Wheelbase (in)",
+    "overall_length_inches": "Length (in)",
+    "overall_width_inches": "Width (in)",
+    "overall_height_inches": "Height (in)",
+    "cargo_length_inches": "Cargo Length (in)",
+    "cargo_width_inches": "Cargo Width (in)",
+    "cargo_height_inches": "Cargo Height (in)",
+    "cab_configuration": "Cab Configuration",
+    "bed_length": "Bed Length",
+    "axle_configuration": "Axle Configuration",
+    "axle_ratio": "Axle Ratio",
+    "duty_cycle": "Duty Cycle",
+    "vocation": "Vocation",
+    "electrification_suitability": "EV Suitability",
+    "data_source": "Data Source",
+    "data_confidence": "Data Confidence"
 }
 
 # Define field categories for UI organization
@@ -193,7 +306,22 @@ FIELD_CATEGORIES = {
     ],
     "Commercial Vehicle": [
         "Commercial Category", "GVWR (lbs)", "Engine HP", "Engine Type", 
-        "Is Diesel", "Is Commercial", "Commercial Summary", "Vehicle Class"
+        "Is Diesel", "Is Commercial", "Commercial Summary", "Vehicle Class",
+        "payload_capacity_lbs", "towing_capacity_lbs", "duty_cycle", "vocation",
+        "electrification_suitability"
+    ],
+    "Commercial Specifications": [
+        "gcwr_lbs", "front_gawr_lbs", "rear_gawr_lbs", "engine_torque_lb_ft",
+        "engine_torque_rpm", "max_hp_rpm", "engine_manufacturer", "engine_model",
+        "fuel_tank_capacity_gal", "def_tank_capacity_gal"
+    ],
+    "Vehicle Dimensions": [
+        "wheelbase_inches", "overall_length_inches", "overall_width_inches", 
+        "overall_height_inches", "cargo_length_inches", "cargo_width_inches",
+        "cargo_height_inches", "cab_configuration", "bed_length"
+    ],
+    "Configuration": [
+        "axle_configuration", "axle_ratio", "data_source", "data_confidence"
     ],
     "Vehicle Details": [
         "FuelTypeSecondary", "Series", "Trim", "cylinders", "displ", "drive", "trany"
@@ -212,11 +340,22 @@ FIELD_CATEGORIES = {
     ]
 }
 
-# Initial visible columns in the results table (can be customized by user)
+# Initial visible columns in the results table (optimized for commercial fleet analysis)
 DEFAULT_VISIBLE_COLUMNS = [
-    "VIN", "Year", "Make", "Model", "FuelTypePrimary", "BodyClass", 
-    "MPG Combined", "CO2 emissions", "Commercial Category", "GVWR (lbs)",
-    "Data Quality", "Processing Status", "Annual Mileage", "Asset ID"
+    # Essential identification
+    "VIN", "Year", "Make", "Model", 
+    
+    # Commercial classification (key for fleet analysis)
+    "Commercial Category", "GVWR (lbs)", "Vehicle Class",
+    
+    # Operational capabilities (critical for commercial use)
+    "payload_capacity_lbs", "towing_capacity_lbs", "duty_cycle",
+    
+    # Electrification potential (primary goal)
+    "electrification_suitability", "MPG Combined", "FuelTypePrimary",
+    
+    # Fleet management basics
+    "Annual Mileage", "Asset ID", "Data Quality", "Processing Status"
 ]
 
 # Additional data column mappings for common fleet management field names

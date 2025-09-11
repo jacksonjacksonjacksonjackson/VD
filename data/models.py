@@ -14,6 +14,12 @@ import logging
 
 from settings import ALL_FUEL_ECONOMY_FIELDS
 
+# Import CommercialVehicleSpecs after models are defined to avoid circular imports
+# We'll use TYPE_CHECKING to avoid runtime import issues
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from commercial_vehicle_scraper import CommercialVehicleSpecs
+
 ###############################################################################
 # Base Models
 ###############################################################################
@@ -338,6 +344,9 @@ class FleetVehicle(BaseModel):
     consistency_score: float = 0.0
     confidence_factors: Dict[str, Any] = field(default_factory=dict)
     last_quality_check: Optional[datetime.datetime] = None
+    
+    # Commercial vehicle specifications from web scraping
+    commercial_specs: Optional['CommercialVehicleSpecs'] = None
     
     def calculate_detailed_quality(self) -> Dict[str, Any]:
         """
@@ -666,6 +675,40 @@ class FleetVehicle(BaseModel):
             "Is Commercial": "Yes" if self.vehicle_id.is_commercial else "No",
             "Commercial Summary": self.vehicle_id.commercial_summary
         }
+        
+        # Add commercial vehicle specifications from web scraping
+        if self.commercial_specs:
+            commercial_data = {
+                "payload_capacity_lbs": str(self.commercial_specs.payload_capacity_lbs or ""),
+                "towing_capacity_lbs": str(self.commercial_specs.towing_capacity_lbs or ""),
+                "gcwr_lbs": str(self.commercial_specs.gcwr_lbs or ""),
+                "front_gawr_lbs": str(self.commercial_specs.front_gawr_lbs or ""),
+                "rear_gawr_lbs": str(self.commercial_specs.rear_gawr_lbs or ""),
+                "engine_torque_lb_ft": str(self.commercial_specs.engine_torque_lb_ft or ""),
+                "engine_torque_rpm": str(self.commercial_specs.engine_torque_rpm or ""),
+                "max_hp_rpm": str(self.commercial_specs.max_hp_rpm or ""),
+                "engine_manufacturer": self.commercial_specs.engine_manufacturer,
+                "engine_model": self.commercial_specs.engine_model,
+                "fuel_tank_capacity_gal": str(self.commercial_specs.fuel_tank_capacity_gal or ""),
+                "def_tank_capacity_gal": str(self.commercial_specs.def_tank_capacity_gal or ""),
+                "wheelbase_inches": str(self.commercial_specs.wheelbase_inches or ""),
+                "overall_length_inches": str(self.commercial_specs.overall_length_inches or ""),
+                "overall_width_inches": str(self.commercial_specs.overall_width_inches or ""),
+                "overall_height_inches": str(self.commercial_specs.overall_height_inches or ""),
+                "cargo_length_inches": str(self.commercial_specs.cargo_length_inches or ""),
+                "cargo_width_inches": str(self.commercial_specs.cargo_width_inches or ""),
+                "cargo_height_inches": str(self.commercial_specs.cargo_height_inches or ""),
+                "cab_configuration": self.commercial_specs.cab_configuration,
+                "bed_length": self.commercial_specs.bed_length,
+                "axle_configuration": self.commercial_specs.axle_configuration,
+                "axle_ratio": self.commercial_specs.axle_ratio,
+                "duty_cycle": self.commercial_specs.duty_cycle,
+                "vocation": self.commercial_specs.vocation,
+                "electrification_suitability": self.commercial_specs.electrification_suitability,
+                "data_source": self.commercial_specs.data_source,
+                "data_confidence": f"{self.commercial_specs.data_confidence:.0%}" if self.commercial_specs.data_confidence else "",
+            }
+            result.update(commercial_data)
         
         # Add all raw data fields from fuel economy
         for key, value in self.fuel_economy.raw_data.items():

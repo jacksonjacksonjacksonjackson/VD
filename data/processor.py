@@ -23,6 +23,8 @@ from utils import safe_cast, validate_vin, validate_vin_detailed, timestamp, Err
 from data.models import FleetVehicle, VehicleIdentification, FuelEconomyData, Fleet
 from data.providers import VehicleDataProvider
 
+from commercial_vehicle_scraper import EnhancedCommercialVehicleProvider
+
 # Set up module logger
 logger = logging.getLogger(__name__)
 
@@ -666,7 +668,17 @@ class ProcessingPipeline:
         self.output_path = output_path
         self.max_threads = max_threads
         
-        self.provider = VehicleDataProvider(cache_enabled=True)
+        # Configure provider with optimized settings from settings.py
+        from settings import SCRAPING_CONFIG, THREADING_CONFIG
+        self.provider = EnhancedCommercialVehicleProvider(
+            cache_enabled=True,
+            enable_scraping=SCRAPING_CONFIG.get("enable_scraping", True),
+            use_selenium=SCRAPING_CONFIG.get("use_selenium", False)
+        )
+        
+        # Use optimized threading configuration
+        self.core_threads = min(max_threads, THREADING_CONFIG.get("core_threads", 4))
+        self.batch_size = THREADING_CONFIG.get("batch_size", 50)
         self.stop_event = threading.Event()
         self.vehicles = []
         self.results = {}
@@ -724,10 +736,11 @@ class ProcessingPipeline:
         total = len(vins)
         processed = 0
         
-        # Process in batches for better progress reporting
-        batch_size = min(100, max(10, total // 10))
+        # Process in batches for better progress reporting and memory management
+        batch_size = min(self.batch_size, max(10, total // 10))
         
-        with ThreadPoolExecutor(max_workers=self.max_threads) as executor:
+        # Use optimized thread count
+        with ThreadPoolExecutor(max_workers=self.core_threads) as executor:
             # Submit all VINs for processing
             future_to_vin = {
                 executor.submit(self._process_single_vin, vin): vin 
@@ -1161,6 +1174,24 @@ class ProcessingPipeline:
             assumed_vehicle_id=data.get("assumed_vehicle_id", ""),
             assumed_vehicle_text=data.get("assumed_vehicle_text", "")
         )
+        
+        # Add commercial vehicle specifications if available
+        if "commercial_specs" in data and data["commercial_specs"]:
+            try:
+                # Import here to avoid circular imports
+                from commercial_vehicle_scraper import CommercialVehicleSpecs
+                
+                # Create CommercialVehicleSpecs object from data
+                specs_data = data["commercial_specs"]
+                if isinstance(specs_data, dict):
+                    vehicle.commercial_specs = CommercialVehicleSpecs(**specs_data)
+                elif hasattr(specs_data, '__dict__'):
+                    # Already a CommercialVehicleSpecs object
+                    vehicle.commercial_specs = specs_data
+                else:
+                    logger.warning(f"Unexpected commercial_specs data type for {vin}: {type(specs_data)}")
+            except Exception as e:
+                logger.warning(f"Failed to add commercial specs for {vin}: {e}")
         
         return vehicle
     
