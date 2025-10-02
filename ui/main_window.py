@@ -41,6 +41,7 @@ from utils import StatusBar, SimpleTooltip, ProgressDialog, SafeDict, timestamp
 from ui.process_panel import ProcessPanel
 from ui.results_panel import ResultsPanel
 from ui.analysis_panel import AnalysisPanel
+from ui.present_panel import PresentPanel
 
 # Import data and analysis modules
 from data.models import FleetVehicle, Fleet
@@ -247,6 +248,15 @@ class MainWindow:
         )
         self.analysis_panel.pack(fill=tk.BOTH, expand=True)
         self.notebook.add(self.analysis_frame, text="Analysis")
+        
+        # Present panel
+        self.present_frame = ttk.Frame(self.notebook)
+        self.present_panel = PresentPanel(
+            self.present_frame,
+            sharing_data=self.sharing_data
+        )
+        self.present_panel.get_panel_frame().pack(fill=tk.BOTH, expand=True)
+        self.notebook.add(self.present_frame, text="Present")
     
     def _bind_events(self):
         """Bind events for the main window."""
@@ -1028,6 +1038,9 @@ and industry sources to ensure comprehensive and accurate specifications.
                 )
                 logger.info(f"🔧 DEBUG: Fleet created successfully with {len(vehicles)} vehicles")
                 
+                # Update shared data for Present panel
+                self.sharing_data.set("fleet", self.fleet)
+                
                 # UI updates - ensure they happen on main thread
                 def update_ui():
                     try:
@@ -1042,6 +1055,11 @@ and industry sources to ensure comprehensive and accurate specifications.
                         logger.info(f"🔧 DEBUG: Calling analysis_panel.set_fleet()")
                         self.analysis_panel.set_fleet(self.fleet)
                         logger.info(f"🔧 DEBUG: analysis_panel.set_fleet() completed")
+                        
+                        # Update present panel
+                        logger.info(f"🔧 DEBUG: Calling present_panel.refresh_data()")
+                        self.present_panel.refresh_data()
+                        logger.info(f"🔧 DEBUG: present_panel.refresh_data() completed")
                         
                         # Update vehicle count
                         logger.info(f"🔧 DEBUG: Updating vehicle count")

@@ -137,7 +137,15 @@ def run_gui_mode(args):
         logger.warning("Drag-and-drop support not available (tkinterdnd2 not installed)")
     
     root.title(f"{APP_NAME} v{APP_VERSION}")
-    root.geometry(DEFAULT_WINDOW_SIZE)
+    
+    # Set window size (good default for demo, scales down to 1280x800)
+    root.geometry("1400x900")
+    root.minsize(1280, 800)  # Minimum size for proper layout
+    
+    # Initialize modern theme
+    from ui.theme import initialize_theme
+    initialize_theme()
+    logger.info("Initialized professional UI theme")
     
     # Create main application window
     app = MainWindow(root)

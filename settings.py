@@ -15,7 +15,7 @@ from typing import Dict, Any
 # Application Information
 ###############################################################################
 APP_NAME = "Fleet Electrification Analyzer"
-APP_VERSION = "3.0.1"
+APP_VERSION = "3.0.2"
 APP_DESCRIPTION = "A tool for analyzing fleet vehicles and planning electrification strategies"
 APP_AUTHOR = "Fleet Analytics"
 

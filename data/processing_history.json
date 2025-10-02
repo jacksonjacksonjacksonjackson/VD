@@ -1,80 +1,80 @@
 [
   {
-    "timestamp": "2025-08-06T16:35:24.499513",
-    "input_file": "/Users/jacksonflynn/Downloads/test_fleet_vins.csv",
-    "output_file": "/Users/jacksonflynn/Documents/Claude R&D/opus vin decoder/100 test vin results.csv",
-    "max_threads": 8,
-    "skip_existing": true,
-    "input_filename": "test_fleet_vins.csv"
-  },
-  {
-    "timestamp": "2025-08-06T16:36:35.116297",
-    "input_file": "/Users/jacksonflynn/Documents/Claude SMCCCD/SMCCCD VINs.csv",
-    "output_file": "/Users/jacksonflynn/Documents/Claude SMCCCD/SMCCCD VINs_fleet_analysis_20250806_163626.csv",
-    "max_threads": 8,
-    "skip_existing": true,
-    "input_filename": "SMCCCD VINs.csv"
-  },
-  {
-    "timestamp": "2025-08-06T17:02:13.472196",
-    "input_file": "/Users/jacksonflynn/Documents/Claude SMCCCD/SMCCCD VINs.csv",
-    "output_file": "/Users/jacksonflynn/Documents/Claude SMCCCD/SMCCCD VINs_fleet_analysis_20250806_170213.csv",
-    "max_threads": 8,
-    "skip_existing": true,
-    "input_filename": "SMCCCD VINs.csv"
-  },
-  {
-    "timestamp": "2025-08-06T17:08:22.101506",
-    "input_file": "/Users/jacksonflynn/Downloads/real_test_fleet_vins.csv",
-    "output_file": "/Users/jacksonflynn/Documents/Claude R&D/opus vin decoder/real results.csv",
-    "max_threads": 8,
-    "skip_existing": true,
-    "input_filename": "real_test_fleet_vins.csv"
-  },
-  {
-    "timestamp": "2025-08-06T17:23:01.144786",
-    "input_file": "/Users/jacksonflynn/Downloads/real_test_fleet_vins.csv",
-    "output_file": "/Users/jacksonflynn/Downloads/real_test_fleet_vins_fleet_analysis_20250806_172257.csv",
-    "max_threads": 8,
-    "skip_existing": true,
-    "input_filename": "real_test_fleet_vins.csv"
-  },
-  {
-    "timestamp": "2025-08-06T17:38:54.706070",
-    "input_file": "/Users/jacksonflynn/Downloads/real_test_fleet_vins.csv",
-    "output_file": "/Users/jacksonflynn/Downloads/real_test_fleet_vins_fleet_analysis_20250806_173850.csv",
-    "max_threads": 8,
-    "skip_existing": true,
-    "input_filename": "real_test_fleet_vins.csv"
-  },
-  {
-    "timestamp": "2025-08-06T17:51:08.762578",
-    "input_file": "/Users/jacksonflynn/Documents/Claude SMCCCD/SMCCCD VINs.csv",
-    "output_file": "/Users/jacksonflynn/Documents/Claude SMCCCD/SMCCCD VINs_fleet_analysis_20250806_175106.csv",
-    "max_threads": 8,
-    "skip_existing": true,
-    "input_filename": "SMCCCD VINs.csv"
-  },
-  {
-    "timestamp": "2025-08-06T18:04:12.914746",
-    "input_file": "/Users/jacksonflynn/Documents/Claude SMCCCD/SMCCCD VINs.csv",
-    "output_file": "/Users/jacksonflynn/Documents/Claude SMCCCD/SMCCCD VINs_fleet_analysis_20250806_180412.csv",
-    "max_threads": 8,
-    "skip_existing": true,
-    "input_filename": "SMCCCD VINs.csv"
-  },
-  {
-    "timestamp": "2025-08-06T18:17:48.578527",
-    "input_file": "/Users/jacksonflynn/Documents/Claude SMCCCD/SMCCCD VINs.csv",
-    "output_file": "/Users/jacksonflynn/Documents/Claude SMCCCD/SMCCCD VINs_fleet_analysis_20250806_181748.csv",
-    "max_threads": 8,
-    "skip_existing": true,
-    "input_filename": "SMCCCD VINs.csv"
-  },
-  {
     "timestamp": "2025-09-09T14:45:09.686901",
     "input_file": "/Users/jacksonflynn/Documents/Optony/Seaside/seaside_vins.csv",
     "output_file": "/Users/jacksonflynn/Documents/Optony/Seaside/processed_seaside_vins.csv",
+    "max_threads": 8,
+    "skip_existing": true,
+    "input_filename": "seaside_vins.csv"
+  },
+  {
+    "timestamp": "2025-09-11T14:35:39.340724",
+    "input_file": "/Users/jacksonflynn/Documents/Claude SMCCCD/SMCCCD VINs.csv",
+    "output_file": "/Users/jacksonflynn/Documents/Claude SMCCCD/SMCCCD VINs_fleet_analysis_20250911_143539.csv",
+    "max_threads": 8,
+    "skip_existing": true,
+    "input_filename": "SMCCCD VINs.csv"
+  },
+  {
+    "timestamp": "2025-09-16T16:49:26.061455",
+    "input_file": "/Users/jacksonflynn/Downloads/cabrilloUSD_vins.csv",
+    "output_file": "/Users/jacksonflynn/Downloads/cabrilloUSD_vins_fleet_analysis_20250916_164920.csv",
+    "max_threads": 8,
+    "skip_existing": true,
+    "input_filename": "cabrilloUSD_vins.csv"
+  },
+  {
+    "timestamp": "2025-09-19T12:51:21.088437",
+    "input_file": "/Users/jacksonflynn/Downloads/cabrilloUSD_vins.csv",
+    "output_file": "/Users/jacksonflynn/Downloads/cabrilloUSD_vins_fleet_analysis_20250919_125121.csv",
+    "max_threads": 8,
+    "skip_existing": true,
+    "input_filename": "cabrilloUSD_vins.csv"
+  },
+  {
+    "timestamp": "2025-09-19T12:56:22.268418",
+    "input_file": "/Users/jacksonflynn/Documents/Optony/Seaside/seaside_vins.csv",
+    "output_file": "/Users/jacksonflynn/Documents/Optony/Seaside/seaside_vins_fleet_analysis_20250919_125622.csv",
+    "max_threads": 8,
+    "skip_existing": true,
+    "input_filename": "seaside_vins.csv"
+  },
+  {
+    "timestamp": "2025-09-26T15:38:56.629107",
+    "input_file": "/Users/jacksonflynn/Documents/Optony/Seaside/seaside_vins.csv",
+    "output_file": "/Users/jacksonflynn/Documents/Optony/Seaside/seaside_vins_fleet_analysis_20250926_153856.csv",
+    "max_threads": 8,
+    "skip_existing": true,
+    "input_filename": "seaside_vins.csv"
+  },
+  {
+    "timestamp": "2025-09-26T16:12:38.038149",
+    "input_file": "/Users/jacksonflynn/Documents/Claude SMCCCD/SMCCCD VINs.csv",
+    "output_file": "/Users/jacksonflynn/Documents/Claude SMCCCD/SMCCCD VINs_fleet_analysis_20250926_161238.csv",
+    "max_threads": 8,
+    "skip_existing": true,
+    "input_filename": "SMCCCD VINs.csv"
+  },
+  {
+    "timestamp": "2025-10-02T14:54:18.667442",
+    "input_file": "/Users/jacksonflynn/Documents/Optony/Seaside/seaside_vins.csv",
+    "output_file": "/Users/jacksonflynn/Documents/Optony/Seaside/seaside_vins_fleet_analysis_20251002_145418.csv",
+    "max_threads": 8,
+    "skip_existing": true,
+    "input_filename": "seaside_vins.csv"
+  },
+  {
+    "timestamp": "2025-10-02T16:31:16.306039",
+    "input_file": "/Users/jacksonflynn/Downloads/cabrilloUSD_vins.csv",
+    "output_file": "/Users/jacksonflynn/Downloads/cabrilloUSD_vins_fleet_analysis_20251002_163116.csv",
+    "max_threads": 8,
+    "skip_existing": true,
+    "input_filename": "cabrilloUSD_vins.csv"
+  },
+  {
+    "timestamp": "2025-10-02T16:34:24.198133",
+    "input_file": "/Users/jacksonflynn/Documents/Optony/Seaside/seaside_vins.csv",
+    "output_file": "/Users/jacksonflynn/Documents/Optony/Seaside/seaside_vins_fleet_analysis_20251002_163424.csv",
     "max_threads": 8,
     "skip_existing": true,
     "input_filename": "seaside_vins.csv"

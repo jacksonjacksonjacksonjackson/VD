@@ -37,6 +37,14 @@ from analysis.calculations import (
 from analysis.charts import ChartFactory
 from analysis.reports import ReportGeneratorFactory, ExportCoordinator
 
+# Import PowerPoint export functionality
+try:
+    from powerpoint_export import export_prelim_deck
+    PPTX_EXPORT_AVAILABLE = True
+except ImportError:
+    PPTX_EXPORT_AVAILABLE = False
+    logger.warning("PowerPoint export not available - powerpoint_export module not found")
+
 # Set up module logger
 logger = logging.getLogger(__name__)
 
@@ -379,6 +387,15 @@ class AnalysisPanel(ttk.Frame):
         )
         chart_btn.pack(fill=tk.X, padx=5, pady=2)
         SimpleTooltip(chart_btn, "Export the currently displayed chart")
+        
+        # Export Preliminary Deck button
+        pptx_btn = ttk.Button(
+            export_frame,
+            text="Export Preliminary Deck (.pptx)",
+            command=self.export_preliminary_deck
+        )
+        pptx_btn.pack(fill=tk.X, padx=5, pady=2)
+        SimpleTooltip(pptx_btn, "Export preliminary PowerPoint deck with fleet analysis")
     
     def _create_right_panel(self):
         """Create the chart display area in the right panel."""
@@ -1137,6 +1154,139 @@ class AnalysisPanel(ttk.Frame):
                 "Export Failed",
                 f"Error exporting chart: {str(e)}"
             )
+    
+    def export_preliminary_deck(self):
+        """Export preliminary PowerPoint deck with fleet analysis."""
+        # Check if PowerPoint export is available
+        if not PPTX_EXPORT_AVAILABLE:
+            messagebox.showerror(
+                "PowerPoint Export Unavailable",
+                "PowerPoint export is not available. Please ensure python-pptx is installed."
+            )
+            return
+        
+        # Check if we have fleet data
+        if not self.fleet or not self.fleet.vehicles:
+            messagebox.showinfo("No Data", "No fleet data available for PowerPoint export.")
+            return
+        
+        # Get file path
+        filepath = filedialog.asksaveasfilename(
+            title="Export Preliminary Deck",
+            defaultextension=".pptx",
+            filetypes=[
+                ("PowerPoint Files", "*.pptx"),
+                ("All Files", "*.*")
+            ]
+        )
+        
+        if not filepath:
+            return
+        
+        # Show progress dialog
+        progress = ProgressDialog(
+            self.master,
+            "Generating PowerPoint",
+            "Please wait while the presentation is being generated..."
+        )
+        
+        # Run export in background thread
+        def export_task():
+            try:
+                # Update progress
+                progress.update(25, "Preparing fleet data...")
+                
+                # Prepare data for PowerPoint export
+                export_data = {
+                    'fleet': self.fleet,
+                    'client_name': getattr(self.fleet, 'client_name', 'Client'),
+                    'stage': 'Preliminary'
+                }
+                
+                # Update progress
+                progress.update(50, "Creating presentation...")
+                
+                # Export the PowerPoint
+                result_path = export_prelim_deck(
+                    data=export_data,
+                    template_path=None,  # Use auto-discovery
+                    out_path=filepath
+                )
+                
+                # Update progress
+                progress.update(100, "Presentation complete!")
+                
+                # Show success message with copyable path
+                def show_success():
+                    success_dialog = tk.Toplevel(self.master)
+                    success_dialog.title("Export Complete")
+                    success_dialog.geometry("500x200")
+                    success_dialog.transient(self.master)
+                    success_dialog.grab_set()
+                    
+                    # Center the dialog
+                    success_dialog.geometry("+{}+{}".format(
+                        self.master.winfo_rootx() + 50,
+                        self.master.winfo_rooty() + 50
+                    ))
+                    
+                    # Success message
+                    message_label = ttk.Label(
+                        success_dialog,
+                        text="PowerPoint presentation has been generated successfully!",
+                        font=("", 12)
+                    )
+                    message_label.pack(pady=20)
+                    
+                    # Path display with copy functionality
+                    path_frame = ttk.Frame(success_dialog)
+                    path_frame.pack(fill=tk.X, padx=20, pady=10)
+                    
+                    path_label = ttk.Label(path_frame, text="Saved to:")
+                    path_label.pack(anchor=tk.W)
+                    
+                    path_text = tk.Text(path_frame, height=2, wrap=tk.WORD)
+                    path_text.insert(tk.END, result_path)
+                    path_text.config(state=tk.DISABLED)
+                    path_text.pack(fill=tk.X, pady=5)
+                    
+                    # Buttons
+                    button_frame = ttk.Frame(success_dialog)
+                    button_frame.pack(pady=20)
+                    
+                    def copy_path():
+                        self.master.clipboard_clear()
+                        self.master.clipboard_append(result_path)
+                        copy_btn.config(text="Copied!")
+                        self.master.after(1000, lambda: copy_btn.config(text="Copy Path"))
+                    
+                    copy_btn = ttk.Button(button_frame, text="Copy Path", command=copy_path)
+                    copy_btn.pack(side=tk.LEFT, padx=5)
+                    
+                    close_btn = ttk.Button(button_frame, text="Close", command=success_dialog.destroy)
+                    close_btn.pack(side=tk.LEFT, padx=5)
+                
+                # Schedule success dialog on main thread
+                self.master.after(500, show_success)
+                
+            except Exception as e:
+                logger.error(f"Error exporting PowerPoint: {e}")
+                
+                # Show error message
+                self.master.after(
+                    500,
+                    lambda: messagebox.showerror(
+                        "Export Failed",
+                        f"Error exporting PowerPoint presentation:\n{str(e)}"
+                    )
+                )
+                
+            finally:
+                # Close progress dialog
+                self.master.after(100, progress.destroy)
+        
+        # Start export thread
+        threading.Thread(target=export_task, daemon=True).start()
     
     def set_fleet(self, fleet):
         """
