@@ -21,6 +21,7 @@ from settings import (
 )
 from utils import SimpleTooltip
 from data.models import FleetVehicle
+from ui.theme import Colors, Fonts, Spacing
 
 # Set up module logger
 logger = logging.getLogger(__name__)
@@ -74,7 +75,7 @@ class ResultsPanel(ttk.Frame):
         """Create the toolbar with search, filters, and actions."""
         # Create toolbar frame
         toolbar = ttk.Frame(self)
-        toolbar.pack(fill=tk.X, padx=10, pady=(10, 5))
+        toolbar.pack(fill=tk.X, padx=Spacing.MARGIN_ELEMENT, pady=(Spacing.MARGIN_ELEMENT, Spacing.SM))
         
         # Left side - search and filters
         search_frame = ttk.Frame(toolbar)
@@ -86,10 +87,10 @@ class ResultsPanel(ttk.Frame):
         search_entry = ttk.Entry(
             search_frame, 
             textvariable=self.search_var,
-            width=25
+            width=30
         )
-        search_entry.pack(side=tk.LEFT, padx=(0, 5))
-        SimpleTooltip(search_entry, "Enter text to filter results")
+        search_entry.pack(side=tk.LEFT, padx=(0, Spacing.SM))
+        SimpleTooltip(search_entry, "Search by VIN, make, model, or any vehicle attribute\nResults update automatically as you type")
         
         # Bind search entry to filter data
         self.search_var.trace_add("write", lambda *args: self._apply_filter())
@@ -115,59 +116,63 @@ class ResultsPanel(ttk.Frame):
         filters_frame.pack(side=tk.LEFT, padx=(10, 0), pady=2)
         
         # Status filter
+        ttk.Label(filters_frame, text="Status:").pack(side=tk.LEFT, padx=(Spacing.SM, 2))
         status_filter = ttk.Combobox(
             filters_frame,
             textvariable=self.status_filter_var,
             values=["all", "successful", "failed"],
-            width=10,
+            width=12,
             state="readonly"
         )
-        status_filter.pack(side=tk.LEFT, padx=5, pady=5)
-        SimpleTooltip(status_filter, "Filter by processing status")
+        status_filter.pack(side=tk.LEFT, padx=Spacing.SM, pady=Spacing.SM)
+        SimpleTooltip(status_filter, "Filter by VIN processing status\n• Successful: VIN decoded and enriched\n• Failed: VIN lookup failed")
         status_filter.bind("<<ComboboxSelected>>", lambda e: self._apply_filter())
         
         # Quality filter
+        ttk.Label(filters_frame, text="Quality:").pack(side=tk.LEFT, padx=(Spacing.SM, 2))
         quality_filter = ttk.Combobox(
             filters_frame,
             textvariable=self.quality_filter_var,
             values=["all", "high quality (80%+)", "medium quality (50-80%)", "low quality (<50%)"],
-            width=15,
+            width=18,
             state="readonly"
         )
-        quality_filter.pack(side=tk.LEFT, padx=5, pady=5)
-        SimpleTooltip(quality_filter, "Filter by data quality score")
+        quality_filter.pack(side=tk.LEFT, padx=Spacing.SM, pady=Spacing.SM)
+        SimpleTooltip(quality_filter, "Filter by data completeness quality\n• High: 80%+ fields populated\n• Medium: 50-80% fields populated\n• Low: <50% fields populated")
         quality_filter.bind("<<ComboboxSelected>>", lambda e: self._apply_filter())
         
         # Right side - actions
         actions_frame = ttk.Frame(toolbar)
         actions_frame.pack(side=tk.RIGHT)
         
-        # Export for Excel Analysis button (primary export)
+        # Export for Excel Analysis button (PRIMARY GREEN - main export action)
         excel_export_btn = ttk.Button(
             actions_frame,
-            text="Export for Excel Analysis",
+            text="📊 Export to Excel",
             command=self._export_for_excel,
-            style="Accent.TButton"
+            style="Primary.TButton"
         )
-        excel_export_btn.pack(side=tk.RIGHT, padx=5)
-        SimpleTooltip(excel_export_btn, "One-click export optimized for Excel analysis with preserved order")
+        excel_export_btn.pack(side=tk.RIGHT, padx=Spacing.SM)
+        SimpleTooltip(excel_export_btn, "Export filtered fleet data to Excel spreadsheet\nOptimized for analysis with proper column order and formatting")
         
-        # Standard export button
+        # Standard export button (SECONDARY - alternative export)
         export_btn = ttk.Button(
             actions_frame,
-            text="Export...",
-            command=self._export_data
+            text="Export Options...",
+            command=self._export_data,
+            style="Secondary.TButton"
         )
-        export_btn.pack(side=tk.RIGHT, padx=5)
-        SimpleTooltip(export_btn, "Export with custom format options")
+        export_btn.pack(side=tk.RIGHT, padx=Spacing.SM)
+        SimpleTooltip(export_btn, "Advanced export with custom format options\nSupports CSV, JSON, and other formats")
         
-        # Clear filter button
+        # Clear filter button (SECONDARY - utility action)
         clear_btn = ttk.Button(
             actions_frame,
             text="Clear Filters",
-            command=self._clear_filter
+            command=self._clear_filter,
+            style="Secondary.TButton"
         )
-        clear_btn.pack(side=tk.RIGHT, padx=5)
+        clear_btn.pack(side=tk.RIGHT, padx=Spacing.SM)
         SimpleTooltip(clear_btn, "Clear all search filters")
         
         # Refresh button
