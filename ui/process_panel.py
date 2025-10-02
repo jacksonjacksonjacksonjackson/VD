@@ -31,6 +31,7 @@ from settings import (
 )
 from utils import SimpleTooltip, ScrollableFrame
 from data.processor import CsvFileValidator, FileValidationResult
+from ui.theme import Colors, Fonts, Spacing
 
 # Set up module logger
 logger = logging.getLogger(__name__)
@@ -480,42 +481,45 @@ class ProcessPanel(ttk.Frame):
         """Create the actions section with control buttons."""
         # Create frame
         actions_frame = ttk.Frame(self)
-        actions_frame.pack(fill=tk.X, padx=10, pady=5)
+        actions_frame.pack(fill=tk.X, padx=Spacing.MARGIN_ELEMENT, pady=Spacing.SM)
         
-        # Start button
+        # Start button (PRIMARY GREEN - main action)
         self.start_button = ttk.Button(
             actions_frame,
-            text="Start Processing",
+            text="▶ Start Processing",
             command=self._start_processing,
-            style="Accent.TButton"
+            style="Primary.TButton"
         )
-        self.start_button.pack(side=tk.LEFT, padx=5, pady=5)
-        SimpleTooltip(self.start_button, "Begin processing VINs")
+        self.start_button.pack(side=tk.LEFT, padx=Spacing.SM, pady=Spacing.SM)
+        SimpleTooltip(self.start_button, "Upload and process VIN data from CSV file\nDecodes VINs using NHTSA database and enriches with fuel economy data")
         
-        # Stop button (initially disabled)
+        # Stop button (DANGER RED - initially disabled)
         self.stop_button = ttk.Button(
             actions_frame,
-            text="Stop",
+            text="⬛ Stop",
             command=self._stop_processing,
+            style="Danger.TButton",
             state=tk.DISABLED
         )
-        self.stop_button.pack(side=tk.LEFT, padx=5, pady=5)
-        SimpleTooltip(self.stop_button, "Stop processing (can't be resumed)")
+        self.stop_button.pack(side=tk.LEFT, padx=Spacing.SM, pady=Spacing.SM)
+        SimpleTooltip(self.stop_button, "Stop processing immediately\nWarning: Cannot be resumed, progress will be lost")
         
-        # Clear log button
+        # Clear log button (SECONDARY GREY - utility action)
         clear_log_btn = ttk.Button(
             actions_frame,
             text="Clear Log",
-            command=self._clear_log
+            command=self._clear_log,
+            style="Secondary.TButton"
         )
-        clear_log_btn.pack(side=tk.RIGHT, padx=5, pady=5)
-        SimpleTooltip(clear_log_btn, "Clear the log display")
+        clear_log_btn.pack(side=tk.RIGHT, padx=Spacing.SM, pady=Spacing.SM)
+        SimpleTooltip(clear_log_btn, "Clear the processing log display")
     
     def _create_log_section(self):
         """Create the log display section."""
         # Create frame
         log_frame = ttk.LabelFrame(self, text="Processing Log")
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(5, 10), ipady=5)
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=Spacing.MARGIN_ELEMENT, 
+                      pady=(Spacing.SM, Spacing.MARGIN_ELEMENT), ipady=Spacing.SM)
         
         # Create text widget with scrollbar
         self.log_text = tk.Text(
@@ -523,16 +527,20 @@ class ProcessPanel(ttk.Frame):
             wrap=tk.WORD,
             width=80,
             height=20,
-            bg="#f5f5f5",
-            state=tk.DISABLED
+            bg=Colors.SURFACE,
+            fg=Colors.TEXT_PRIMARY,
+            font=(Fonts.FAMILY_MONO, Fonts.SIZE_SMALL),
+            state=tk.DISABLED,
+            relief=tk.FLAT
         )
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
-        # Configure tags for different log levels
-        self.log_text.tag_configure("info", foreground="black")
-        self.log_text.tag_configure("warning", foreground="orange")
-        self.log_text.tag_configure("error", foreground="red")
-        self.log_text.tag_configure("timestamp", foreground="gray")
+        # Configure tags for different log levels with theme colors
+        self.log_text.tag_configure("info", foreground=Colors.TEXT_PRIMARY)
+        self.log_text.tag_configure("warning", foreground=Colors.WARNING, font=(Fonts.FAMILY_MONO, Fonts.SIZE_SMALL, "bold"))
+        self.log_text.tag_configure("error", foreground=Colors.ERROR, font=(Fonts.FAMILY_MONO, Fonts.SIZE_SMALL, "bold"))
+        self.log_text.tag_configure("success", foreground=Colors.SUCCESS, font=(Fonts.FAMILY_MONO, Fonts.SIZE_SMALL, "bold"))
+        self.log_text.tag_configure("timestamp", foreground=Colors.TEXT_TERTIARY)
         
         # Add scrollbar
         log_scrollbar = ttk.Scrollbar(log_frame)
@@ -542,14 +550,15 @@ class ProcessPanel(ttk.Frame):
         self.log_text.config(yscrollcommand=log_scrollbar.set)
         log_scrollbar.config(command=self.log_text.yview)
         
-        # Add progress bar
+        # Add progress bar with theme styling
         self.progress_var = tk.DoubleVar(value=0)
         self.progress_bar = ttk.Progressbar(
             self,
             variable=self.progress_var,
-            mode='determinate'
+            mode='determinate',
+            style="TProgressbar"
         )
-        self.progress_bar.pack(fill=tk.X, padx=10, pady=(0, 10))
+        self.progress_bar.pack(fill=tk.X, padx=Spacing.MARGIN_ELEMENT, pady=(0, Spacing.MARGIN_ELEMENT))
         
         # Create right-click menu for log
         self.log_menu = tk.Menu(self, tearoff=0)
