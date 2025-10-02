@@ -29,6 +29,7 @@ from settings import (
 )
 from utils import SimpleTooltip, ProgressDialog
 from data.models import FleetVehicle, Fleet
+from ui.theme import Colors, Fonts, Spacing
 from analysis.calculations import (
     analyze_fleet_electrification,
     create_emissions_inventory,
@@ -299,43 +300,48 @@ class AnalysisPanel(ttk.Frame):
 
         reset_btn = ttk.Button(
             self.left_panel,
-            text="Reset to Defaults",
-            command=reset_defaults
+            text="↺ Reset to Defaults",
+            command=reset_defaults,
+            style="Secondary.TButton"
         )
-        reset_btn.pack(fill=tk.X, padx=5, pady=(0, 10))
+        reset_btn.pack(fill=tk.X, padx=Spacing.SM, pady=(0, Spacing.MARGIN_ELEMENT))
+        SimpleTooltip(reset_btn, "Reset all parameters to default values\nGas: $3.50/gal, Electricity: $0.13/kWh, EV Efficiency: 3.0 mi/kWh")
     
     def _create_analysis_buttons(self):
         """Create analysis action buttons."""
         # Analysis buttons container
-        buttons_frame = ttk.LabelFrame(self.left_panel, text="Analysis Options")
-        buttons_frame.pack(fill=tk.X, pady=(0, 10))
+        buttons_frame = ttk.LabelFrame(self.left_panel, text="Run Analysis")
+        buttons_frame.pack(fill=tk.X, pady=(0, Spacing.MARGIN_ELEMENT))
         
-        # Electrification button
+        # Electrification button (PRIMARY GREEN - main analysis)
         electrify_btn = ttk.Button(
             buttons_frame,
-            text="Electrification Analysis",
-            command=self.run_electrification_analysis
+            text="⚡ Electrification Analysis",
+            command=self.run_electrification_analysis,
+            style="Primary.TButton"
         )
-        electrify_btn.pack(fill=tk.X, padx=5, pady=2)
-        SimpleTooltip(electrify_btn, "Analyze electrification potential and TCO")
+        electrify_btn.pack(fill=tk.X, padx=Spacing.SM, pady=Spacing.SM)
+        SimpleTooltip(electrify_btn, "Comprehensive electrification analysis\n• Identifies suitable vehicles for conversion\n• Calculates Total Cost of Ownership (TCO)\n• Projects savings and ROI over analysis period")
         
-        # Emissions button
+        # Emissions button (SECONDARY - supporting analysis)
         emissions_btn = ttk.Button(
             buttons_frame,
-            text="Emissions Analysis",
-            command=self.run_emissions_analysis
+            text="🌱 Emissions Analysis",
+            command=self.run_emissions_analysis,
+            style="Secondary.TButton"
         )
-        emissions_btn.pack(fill=tk.X, padx=5, pady=2)
-        SimpleTooltip(emissions_btn, "Create emissions inventory and reduction potential")
+        emissions_btn.pack(fill=tk.X, padx=Spacing.SM, pady=Spacing.SM)
+        SimpleTooltip(emissions_btn, "Create detailed emissions inventory\n• Baseline CO₂e emissions by vehicle\n• Reduction potential from electrification\n• Environmental impact metrics")
         
-        # Charging button
+        # Charging button (SECONDARY - supporting analysis)
         charging_btn = ttk.Button(
             buttons_frame,
-            text="Charging Analysis",
-            command=self.run_charging_analysis
+            text="🔌 Charging Analysis",
+            command=self.run_charging_analysis,
+            style="Secondary.TButton"
         )
-        charging_btn.pack(fill=tk.X, padx=5, pady=2)
-        SimpleTooltip(charging_btn, "Analyze charging infrastructure requirements")
+        charging_btn.pack(fill=tk.X, padx=Spacing.SM, pady=Spacing.SM)
+        SimpleTooltip(charging_btn, "Analyze charging infrastructure needs\n• Required charger types and quantities\n• Power demand and load profiles\n• Installation costs and timeline estimates")
     
     def _create_results_summary(self):
         """Create the results summary section."""
@@ -367,35 +373,38 @@ class AnalysisPanel(ttk.Frame):
     def _create_export_section(self):
         """Create the export options section."""
         # Export container
-        export_frame = ttk.LabelFrame(self.left_panel, text="Export Options")
-        export_frame.pack(fill=tk.X, pady=(0, 10))
+        export_frame = ttk.LabelFrame(self.left_panel, text="Export Results")
+        export_frame.pack(fill=tk.X, pady=(0, Spacing.MARGIN_ELEMENT))
         
-        # Export report button
-        report_btn = ttk.Button(
-            export_frame,
-            text="Export Full Report",
-            command=self.export_full_report
-        )
-        report_btn.pack(fill=tk.X, padx=5, pady=2)
-        SimpleTooltip(report_btn, "Export comprehensive report with all analyses")
-        
-        # Export chart button
-        chart_btn = ttk.Button(
-            export_frame,
-            text="Export Current Chart",
-            command=self.export_current_chart
-        )
-        chart_btn.pack(fill=tk.X, padx=5, pady=2)
-        SimpleTooltip(chart_btn, "Export the currently displayed chart")
-        
-        # Export Preliminary Deck button
+        # Export PowerPoint button (PRIMARY GREEN - main export for demo)
         pptx_btn = ttk.Button(
             export_frame,
-            text="Export Preliminary Deck (.pptx)",
-            command=self.export_preliminary_deck
+            text="📊 Export PowerPoint",
+            command=self.export_preliminary_deck,
+            style="Primary.TButton"
         )
-        pptx_btn.pack(fill=tk.X, padx=5, pady=2)
-        SimpleTooltip(pptx_btn, "Export preliminary PowerPoint deck with fleet analysis")
+        pptx_btn.pack(fill=tk.X, padx=Spacing.SM, pady=Spacing.SM)
+        SimpleTooltip(pptx_btn, "Generate professional PowerPoint presentation\n• Native editable charts with real data\n• Executive summary with key findings\n• Ready for stakeholder meetings")
+        
+        # Export report button (SECONDARY - detailed report)
+        report_btn = ttk.Button(
+            export_frame,
+            text="📄 Export Full Report",
+            command=self.export_full_report,
+            style="Secondary.TButton"
+        )
+        report_btn.pack(fill=tk.X, padx=Spacing.SM, pady=Spacing.SM)
+        SimpleTooltip(report_btn, "Export comprehensive analysis report\n• Detailed findings and recommendations\n• Supports Excel, PDF, and CSV formats")
+        
+        # Export chart button (SECONDARY - single chart)
+        chart_btn = ttk.Button(
+            export_frame,
+            text="📈 Export Current Chart",
+            command=self.export_current_chart,
+            style="Secondary.TButton"
+        )
+        chart_btn.pack(fill=tk.X, padx=Spacing.SM, pady=Spacing.SM)
+        SimpleTooltip(chart_btn, "Export current chart as image\n• High resolution PNG or SVG\n• Suitable for reports and documents")
     
     def _create_right_panel(self):
         """Create the chart display area in the right panel."""
