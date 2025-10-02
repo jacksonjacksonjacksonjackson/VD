@@ -21,6 +21,7 @@ from settings import (
 )
 from utils import SimpleTooltip, ProgressDialog
 from powerpoint_export import export_prelim_deck
+from ui.theme import Colors, Fonts, Spacing
 from powerpoint_customizer import (
     PowerPointCustomizer, executive_summary_config, technical_analysis_config,
     data_focused_config, timeline_focused_config, get_slide_selection_help
@@ -292,14 +293,15 @@ class PresentPanel:
         controls_frame = ttk.Frame(export_frame)
         controls_frame.pack(fill=tk.X)
         
-        # Export button
+        # Export button (PRIMARY GREEN - main action)
         self.export_button = ttk.Button(
             controls_frame,
-            text="Generate PowerPoint",
+            text="📊 Generate PowerPoint",
             command=self._export_presentation,
-            style="Accent.TButton"
+            style="Primary.TButton"
         )
-        self.export_button.pack(side=tk.LEFT, padx=(0, 10))
+        self.export_button.pack(side=tk.LEFT, padx=(0, Spacing.MARGIN_ELEMENT))
+        SimpleTooltip(self.export_button, "Generate professional PowerPoint presentation\n• Editable native charts with real fleet data\n• Customized slides based on your selection\n• Ready for stakeholder presentations")
         
         # Export status
         self.export_status = ttk.Label(
