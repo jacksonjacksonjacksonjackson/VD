@@ -287,30 +287,43 @@ class Styles:
             font=(Fonts.FAMILY_SANS, Fonts.SIZE_H3, Fonts.WEIGHT_BOLD)
         )
         
-        # Notebook (tabs) styles
+        # Notebook (tabs) styles - FIXED: Selected tab now larger and more prominent
         style.configure(
             "TNotebook",
             background=Colors.BACKGROUND,
-            borderwidth=0
+            borderwidth=0,
+            tabmargins=[0, 0, 0, 0]
         )
         
         style.configure(
             "TNotebook.Tab",
-            background=Colors.SURFACE,
+            background=Colors.SECONDARY_GREY,
             foreground=Colors.TEXT_SECONDARY,
             padding=(Spacing.LG, Spacing.MD),
-            font=(Fonts.FAMILY_SANS, Fonts.SIZE_BODY)
+            font=(Fonts.FAMILY_SANS, Fonts.SIZE_BODY),
+            borderwidth=0,
+            focuscolor='none'
         )
         
         style.map(
             "TNotebook.Tab",
             background=[
                 ('selected', Colors.SURFACE),
-                ('active', Colors.SURFACE_HOVER)
+                ('active', Colors.SURFACE_HOVER),
+                ('!selected', Colors.SECONDARY_GREY)
             ],
             foreground=[
                 ('selected', Colors.PRIMARY_GREEN),
-                ('active', Colors.TEXT_PRIMARY)
+                ('active', Colors.TEXT_PRIMARY),
+                ('!selected', Colors.TEXT_TERTIARY)
+            ],
+            padding=[
+                ('selected', (Spacing.LG + 4, Spacing.MD + 2)),  # Selected tab is LARGER
+                ('!selected', (Spacing.LG, Spacing.MD))
+            ],
+            font=[
+                ('selected', (Fonts.FAMILY_SANS, Fonts.SIZE_BODY, Fonts.WEIGHT_BOLD)),  # Selected tab is BOLD
+                ('!selected', (Fonts.FAMILY_SANS, Fonts.SIZE_BODY, Fonts.WEIGHT_NORMAL))
             ]
         )
         
