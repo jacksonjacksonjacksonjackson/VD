@@ -85,14 +85,17 @@ class ReportGenerator:
 class CsvReportGenerator(ReportGenerator):
     """Generate CSV reports from fleet data."""
     
-    def generate(self, fleet: Union[Fleet, List[FleetVehicle]], fields: Optional[List[str]] = None) -> bool:
+    def generate(self, fleet: Union[Fleet, List[FleetVehicle]], fields: Optional[List[str]] = None,
+                 **kwargs) -> bool:
         """
         Generate a CSV report from fleet data.
-        
+
         Args:
             fleet: Fleet object or list of vehicles
             fields: List of fields to include (None for default fields)
-            
+            **kwargs: Accepts (and ignores) analysis, charging, emissions for API
+                      compatibility with ExportCoordinator
+
         Returns:
             True if successful, False otherwise
         """
@@ -219,7 +222,15 @@ class ExcelReportGenerator(ReportGenerator):
             # Create Emissions Inventory sheet if available
             if emissions:
                 self._create_emissions_sheet(workbook, emissions, title_format, header_format, cell_format, number_format)
-            
+
+            # Phase 9I: Analysis-ready sheets
+            if analysis and hasattr(analysis, 'fleet_cash_flows') and analysis.fleet_cash_flows:
+                self._create_tco_model_sheet(workbook, analysis, vehicles, title_format, header_format, cell_format, number_format)
+
+            self._create_replacement_schedule_sheet(workbook, vehicles, title_format, header_format, cell_format, number_format)
+
+            self._create_summary_dashboard_sheet(workbook, vehicles, analysis, charging, emissions, title_format, header_format, cell_format, number_format)
+
             # Close workbook to save changes
             workbook.close()
             
@@ -747,6 +758,237 @@ class ExcelReportGenerator(ReportGenerator):
                 worksheet.write(row, 0, ftype)
                 worksheet.write(row, 1, value, number_format)
                 worksheet.write(row, 2, f"{percentage:.1f}%")
+                row += 1
+
+
+    def _create_tco_model_sheet(self, workbook, analysis, vehicles, title_format, header_format, cell_format, number_format):
+        """Create TCO Model sheet with year-by-year cash flows."""
+        ws = workbook.add_worksheet("TCO Model")
+        currency_fmt = workbook.add_format({'border': 1, 'num_format': '$#,##0'})
+        pct_fmt = workbook.add_format({'border': 1, 'num_format': '0.0%'})
+
+        ws.merge_range('A1:H1', "Fleet TCO Model — Year-by-Year Cash Flows", title_format)
+
+        # Headers
+        headers = ["Year", "ICE Annual Cost", "EV Annual Cost", "Annual Savings",
+                    "ICE Cumulative", "EV Cumulative", "Cumulative Savings", "Notes"]
+        for col, h in enumerate(headers):
+            ws.write(2, col, h, header_format)
+            ws.set_column(col, col, 18)
+
+        cash_flows = analysis.fleet_cash_flows
+        for i, cf in enumerate(cash_flows):
+            row = 3 + i
+            year_val = cf.get('year', i)
+            ice_annual = cf.get('ice_annual_cost', 0)
+            ev_annual = cf.get('ev_annual_cost', 0)
+            ice_cumul = cf.get('ice_cumulative', 0)
+            ev_cumul = cf.get('ev_cumulative', 0)
+            savings = ice_annual - ev_annual
+            cumul_savings = ice_cumul - ev_cumul
+
+            ws.write(row, 0, year_val, cell_format)
+            ws.write(row, 1, ice_annual, currency_fmt)
+            ws.write(row, 2, ev_annual, currency_fmt)
+            ws.write(row, 3, savings, currency_fmt)
+            ws.write(row, 4, ice_cumul, currency_fmt)
+            ws.write(row, 5, ev_cumul, currency_fmt)
+            ws.write(row, 6, cumul_savings, currency_fmt)
+
+            note = ""
+            if i == 0:
+                note = "Year 0: Purchase costs"
+            elif cumul_savings > 0 and (i == 1 or (ice_cumul - ev_cumul > 0 and cf.get('ice_cumulative', 0) - cf.get('ev_cumulative', 0) > 0)):
+                if i > 0:
+                    prev_savings = cash_flows[i-1].get('ice_cumulative', 0) - cash_flows[i-1].get('ev_cumulative', 0)
+                    if prev_savings <= 0 and cumul_savings > 0:
+                        note = "PAYBACK YEAR"
+            ws.write(row, 7, note, cell_format)
+
+        # Assumptions section
+        row_start = 3 + len(cash_flows) + 2
+        ws.write(row_start, 0, "Assumptions", title_format)
+        assumptions = [
+            ("Fleet size", f"{len(vehicles)} vehicles"),
+            ("Analysis period", f"{len(cash_flows)} years"),
+            ("Total ICE cost", f"${cash_flows[-1].get('ice_cumulative', 0):,.0f}" if cash_flows else ""),
+            ("Total EV cost", f"${cash_flows[-1].get('ev_cumulative', 0):,.0f}" if cash_flows else ""),
+        ]
+        for i, (label, val) in enumerate(assumptions):
+            ws.write(row_start + 1 + i, 0, label, cell_format)
+            ws.write(row_start + 1 + i, 1, val, cell_format)
+
+    def _create_replacement_schedule_sheet(self, workbook, vehicles, title_format, header_format, cell_format, number_format):
+        """Create Replacement Schedule sheet — Gantt-style table."""
+        ws = workbook.add_worksheet("Replacement Schedule")
+        currency_fmt = workbook.add_format({'border': 1, 'num_format': '$#,##0'})
+        year_fmt = workbook.add_format({'border': 1, 'align': 'center', 'bg_color': '#D6EAF8'})
+
+        ws.merge_range('A1:F1', "Vehicle Replacement Schedule", title_format)
+
+        # Gather schedulable vehicles
+        scheduled = []
+        for v in vehicles:
+            ev_year = v.custom_fields.get('Proposed EV Year', '')
+            if ev_year and ev_year not in ('N/A', 'Exempt', ''):
+                try:
+                    year_int = int(ev_year)
+                except (ValueError, TypeError):
+                    continue
+                make = v.vehicle_id.make or ''
+                model = v.vehicle_id.model or ''
+                dept = v.custom_fields.get('department', '')
+                ev_equiv = v.custom_fields.get('EV Equivalent', '')
+                ev_cost = float(v.custom_fields.get('_ev_purchase_price', 0) or 0)
+                scheduled.append({
+                    'vehicle': f"{v.vehicle_id.year or ''} {make} {model}".strip(),
+                    'dept': dept,
+                    'ev_year': year_int,
+                    'ev_equiv': ev_equiv,
+                    'ev_cost': ev_cost,
+                    'vin': v.vin[:8] + '...' if v.vin else '',
+                })
+
+        if not scheduled:
+            ws.write(2, 0, "No vehicles scheduled for replacement")
+            return
+
+        scheduled.sort(key=lambda x: (x['ev_year'], x['vehicle']))
+
+        # Get year range
+        all_years = sorted(set(s['ev_year'] for s in scheduled))
+
+        # Headers
+        base_headers = ["Vehicle", "VIN", "Department", "EV Equivalent", "Est. Cost"]
+        for col, h in enumerate(base_headers):
+            ws.write(2, col, h, header_format)
+        ws.set_column(0, 0, 25)
+        ws.set_column(1, 1, 12)
+        ws.set_column(2, 2, 18)
+        ws.set_column(3, 3, 22)
+        ws.set_column(4, 4, 14)
+
+        # Year columns
+        for i, yr in enumerate(all_years):
+            col = len(base_headers) + i
+            ws.write(2, col, str(yr), header_format)
+            ws.set_column(col, col, 8)
+
+        # Data rows
+        for row_idx, s in enumerate(scheduled):
+            row = 3 + row_idx
+            ws.write(row, 0, s['vehicle'], cell_format)
+            ws.write(row, 1, s['vin'], cell_format)
+            ws.write(row, 2, s['dept'], cell_format)
+            ws.write(row, 3, s['ev_equiv'], cell_format)
+            ws.write(row, 4, s['ev_cost'], currency_fmt)
+
+            # Mark the replacement year
+            for i, yr in enumerate(all_years):
+                col = len(base_headers) + i
+                if yr == s['ev_year']:
+                    ws.write(row, col, "X", year_fmt)
+                else:
+                    ws.write(row, col, "", cell_format)
+
+        # Summary row
+        summary_row = 3 + len(scheduled) + 1
+        ws.write(summary_row, 0, "Vehicles per year:", header_format)
+        for i, yr in enumerate(all_years):
+            col = len(base_headers) + i
+            count = sum(1 for s in scheduled if s['ev_year'] == yr)
+            ws.write(summary_row, col, count, header_format)
+
+        total_cost = sum(s['ev_cost'] for s in scheduled)
+        ws.write(summary_row + 1, 0, "Total estimated cost:", header_format)
+        ws.write(summary_row + 1, 4, total_cost, currency_fmt)
+
+    def _create_summary_dashboard_sheet(self, workbook, vehicles, analysis, charging, emissions, title_format, header_format, cell_format, number_format):
+        """Create Summary Dashboard sheet with KPI reference cells."""
+        ws = workbook.add_worksheet("Summary Dashboard")
+        kpi_title_fmt = workbook.add_format({
+            'bold': True, 'font_size': 11, 'bg_color': '#2C3E50',
+            'font_color': 'white', 'border': 1, 'align': 'center'
+        })
+        kpi_value_fmt = workbook.add_format({
+            'bold': True, 'font_size': 16, 'align': 'center',
+            'border': 1, 'num_format': '$#,##0'
+        })
+        kpi_text_fmt = workbook.add_format({
+            'bold': True, 'font_size': 16, 'align': 'center', 'border': 1
+        })
+
+        ws.merge_range('A1:F1', "Fleet Electrification — Executive Summary Dashboard", title_format)
+        ws.set_column(0, 5, 22)
+
+        # Row 3-4: Fleet KPIs
+        fleet_kpis = [
+            ("Fleet Size", str(len(vehicles)), False),
+            ("Avg MPG", f"{sum(v.fuel_economy.combined_mpg or 0 for v in vehicles) / max(1, sum(1 for v in vehicles if v.fuel_economy.combined_mpg)):,.1f}", False),
+        ]
+
+        if analysis:
+            fleet_kpis.extend([
+                ("Annual Savings", analysis.total_savings, True),
+                ("CO₂ Reduction", f"{analysis.co2_savings:,.1f} MT", False),
+                ("Payback Period", f"{analysis.payback_period:.1f} yr", False),
+            ])
+
+        if charging:
+            fleet_kpis.append(
+                ("Infrastructure Cost", charging.estimated_installation_cost, True)
+            )
+
+        for col, (title, value, is_currency) in enumerate(fleet_kpis):
+            ws.write(2, col, title, kpi_title_fmt)
+            if is_currency:
+                ws.write(3, col, value, kpi_value_fmt)
+            else:
+                ws.write(3, col, str(value), kpi_text_fmt)
+
+        # Row 6+: Breakdown tables
+        row = 6
+        if emissions and emissions.by_department:
+            ws.write(row, 0, "Emissions by Department", header_format)
+            ws.write(row, 1, "MT CO2e", header_format)
+            row += 1
+            for dept, em in sorted(emissions.by_department.items(), key=lambda x: x[1], reverse=True):
+                ws.write(row, 0, dept, cell_format)
+                ws.write(row, 1, em, number_format)
+                row += 1
+            row += 1
+
+        # ACF breakdown
+        acf_counts = {}
+        for v in vehicles:
+            code = v.custom_fields.get('ACF Category', '')
+            if code:
+                acf_counts[code] = acf_counts.get(code, 0) + 1
+
+        if acf_counts:
+            ws.write(row, 0, "ACF Classification", header_format)
+            ws.write(row, 1, "Count", header_format)
+            row += 1
+            for cat, count in sorted(acf_counts.items()):
+                ws.write(row, 0, cat, cell_format)
+                ws.write(row, 1, count, cell_format)
+                row += 1
+            row += 1
+
+        # EV year distribution
+        year_counts = {}
+        for v in vehicles:
+            yr = v.custom_fields.get('Proposed EV Year', '')
+            if yr and yr not in ('N/A', 'Exempt'):
+                year_counts[yr] = year_counts.get(yr, 0) + 1
+
+        if year_counts:
+            ws.write(row, 0, "Replacement Year", header_format)
+            ws.write(row, 1, "Vehicles", header_format)
+            row += 1
+            for yr, count in sorted(year_counts.items()):
+                ws.write(row, 0, yr, cell_format)
+                ws.write(row, 1, count, cell_format)
                 row += 1
 
 

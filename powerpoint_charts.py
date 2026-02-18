@@ -90,66 +90,85 @@ def add_fleet_composition_chart(slide, vehicles: List[FleetVehicle],
 def add_emissions_timeline_chart(slide, vehicles: List[FleetVehicle],
                                left: float = 1, top: float = 2,
                                width: float = 8, height: float = 4) -> bool:
-    """Add CO2 emissions reduction timeline chart showing reduction over years."""
+    """Add CO2 emissions reduction timeline based on actual Proposed EV Year assignments.
+
+    Computes real baseline emissions from vehicle data, then projects annual
+    reductions by removing each vehicle's CO2 in the year it's scheduled for
+    replacement (per the electrification timeline).
+    """
     try:
         if not vehicles:
             return False
-        
-        # Calculate baseline emissions and projected reductions
+
         current_year = datetime.now().year
-        years = list(range(current_year, current_year + 11))  # 10-year projection
-        
-        # Calculate current total emissions
-        baseline_emissions = 0
-        for vehicle in vehicles:
-            annual_mileage = getattr(vehicle, 'annual_mileage', 12000)
-            co2_per_mile = getattr(vehicle.fuel_economy, 'co2_primary', 400)  # g/mile
-            if co2_per_mile > 0:
-                # Convert to metric tons per year
-                vehicle_emissions = (co2_per_mile * annual_mileage) / 1000000 * 1.1023
-                baseline_emissions += vehicle_emissions
-        
-        # Project emissions reductions (assuming gradual electrification)
+
+        # Build per-vehicle emissions and replacement year
+        vehicle_emissions = {}  # year -> list of annual CO2 (metric tons)
+        baseline_emissions = 0.0
+
+        for v in vehicles:
+            annual_mileage = v.annual_mileage or 12000
+            co2_per_mile = v.fuel_economy.co2_primary or 0
+            if co2_per_mile <= 0:
+                mpg = v.fuel_economy.combined_mpg or 0
+                co2_per_mile = 8900 / mpg if mpg > 0 else 0
+            if co2_per_mile <= 0:
+                continue
+
+            v_co2 = (co2_per_mile * annual_mileage) / 1000000
+            baseline_emissions += v_co2
+
+            # Get proposed replacement year
+            ev_year_str = v.custom_fields.get("Proposed EV Year", "")
+            try:
+                ev_year = int(ev_year_str)
+            except (ValueError, TypeError):
+                ev_year = None  # N/A, Exempt, or blank
+
+            if ev_year and current_year < ev_year <= current_year + 15:
+                vehicle_emissions.setdefault(ev_year, []).append(v_co2)
+
+        if baseline_emissions <= 0:
+            return False
+
+        # Build year-by-year emissions projection
+        max_year = max(vehicle_emissions.keys()) if vehicle_emissions else current_year + 10
+        years = list(range(current_year, max(current_year + 11, max_year + 1)))
+        remaining = baseline_emissions
         emissions_data = []
-        reduction_rates = [0, 0.05, 0.10, 0.18, 0.28, 0.40, 0.55, 0.68, 0.78, 0.85, 0.90]
-        
-        for i, year in enumerate(years):
-            reduction_rate = reduction_rates[i] if i < len(reduction_rates) else 0.90
-            remaining_emissions = baseline_emissions * (1 - reduction_rate)
-            emissions_data.append(round(remaining_emissions, 1))
-        
-        # Create chart data
+        for year in years:
+            removed = sum(vehicle_emissions.get(year, []))
+            remaining -= removed
+            emissions_data.append(round(max(0, remaining), 1))
+
+        # Create chart
         chart_data = CategoryChartData()
-        chart_data.categories = [str(year) for year in years]
+        chart_data.categories = [str(y) for y in years]
         chart_data.add_series('Fleet CO₂ Emissions (MT)', emissions_data)
-        
-        # Add chart to slide
+
         chart = slide.shapes.add_chart(
             XL_CHART_TYPE.LINE,
             Inches(left), Inches(top),
             Inches(width), Inches(height),
             chart_data
         ).chart
-        
-        # Format chart with improved styling
+
         chart.has_legend = False
         chart.chart_title.text_frame.text = "Fleet CO₂ Emissions Reduction Timeline"
         chart.chart_title.text_frame.paragraphs[0].font.size = Pt(14)
         chart.chart_title.text_frame.paragraphs[0].font.bold = True
-        
-        # Format axes
+
         chart.value_axis.axis_title.text_frame.text = "CO₂ Emissions (Metric Tons)"
         chart.value_axis.axis_title.text_frame.paragraphs[0].font.size = Pt(11)
         chart.category_axis.axis_title.text_frame.text = "Year"
         chart.category_axis.axis_title.text_frame.paragraphs[0].font.size = Pt(11)
-        
-        # Format series
+
         series = chart.series[0]
         series.format.line.color.rgb = RGBColor(*tuple(int(PRIMARY_HEX_1.lstrip('#')[j:j+2], 16) for j in (0, 2, 4)))
         series.format.line.width = Pt(3)
-        
+
         return True
-        
+
     except Exception as e:
         logger.error(f"Failed to create emissions timeline chart: {e}")
         return False
@@ -177,7 +196,7 @@ def add_emissions_by_weight_class_chart(slide, vehicles: List[FleetVehicle],
             
             if co2_per_mile > 0:
                 # Convert to metric tons per year
-                vehicle_emissions = (co2_per_mile * annual_mileage) / 1000000 * 1.1023
+                vehicle_emissions = (co2_per_mile * annual_mileage) / 1000000
                 
                 # Classify by weight
                 if gvwr <= 8500:
@@ -240,79 +259,87 @@ def add_emissions_by_weight_class_chart(slide, vehicles: List[FleetVehicle],
 def add_electrification_timeline_by_weight_chart(slide, vehicles: List[FleetVehicle],
                                                left: float = 1, top: float = 2,
                                                width: float = 8, height: float = 4) -> bool:
-    """Add stacked bar chart showing electrification timeline by weight class."""
+    """Add stacked bar chart showing electrification timeline by weight class.
+
+    Uses actual Proposed EV Year from vehicle custom_fields instead of
+    hardcoded percentage schedules.
+    """
     try:
         if not vehicles:
             return False
-        
-        # Count vehicles by weight class
-        weight_classes = {
-            'Light Duty': sum(1 for v in vehicles if getattr(v.vehicle_id, 'gvwr_pounds', 0) <= 8500),
-            'Medium Duty': sum(1 for v in vehicles if 8500 < getattr(v.vehicle_id, 'gvwr_pounds', 0) <= 19500),
-            'Heavy Duty': sum(1 for v in vehicles if getattr(v.vehicle_id, 'gvwr_pounds', 0) > 19500)
-        }
-        
-        # Create electrification timeline (10 years)
+
         current_year = datetime.now().year
-        years = [str(year) for year in range(current_year + 1, current_year + 11)]
-        
-        # Electrification schedule by weight class (cumulative percentages)
-        schedules = {
-            'Light Duty': [0.1, 0.25, 0.45, 0.65, 0.80, 0.90, 0.95, 0.98, 0.99, 1.0],
-            'Medium Duty': [0.05, 0.15, 0.30, 0.50, 0.70, 0.85, 0.95, 0.98, 0.99, 1.0],
-            'Heavy Duty': [0.02, 0.08, 0.18, 0.32, 0.50, 0.68, 0.82, 0.92, 0.97, 1.0]
-        }
-        
-        # Create chart data
+
+        def _weight_class(v):
+            gvwr = getattr(v.vehicle_id, 'gvwr_pounds', 0) or 0
+            if gvwr <= 8500:
+                return 'Light Duty'
+            elif gvwr <= 19500:
+                return 'Medium Duty'
+            else:
+                return 'Heavy Duty'
+
+        # Build weight_class -> year -> count from real data
+        data = {}  # {weight_class: {year: count}}
+        all_years = set()
+
+        for v in vehicles:
+            ev_year_str = v.custom_fields.get("Proposed EV Year", "")
+            try:
+                ev_year = int(ev_year_str)
+            except (ValueError, TypeError):
+                continue
+            if ev_year <= current_year or ev_year > current_year + 20:
+                continue
+
+            wc = _weight_class(v)
+            data.setdefault(wc, {})
+            data[wc][ev_year] = data[wc].get(ev_year, 0) + 1
+            all_years.add(ev_year)
+
+        if not all_years:
+            return False
+
+        years = sorted(all_years)
+        year_labels = [str(y) for y in years]
+
         chart_data = CategoryChartData()
-        chart_data.categories = years
-        
-        for weight_class, total_vehicles in weight_classes.items():
-            if total_vehicles > 0:
-                schedule = schedules[weight_class]
-                yearly_counts = []
-                prev_cumulative = 0
-                
-                for pct in schedule:
-                    cumulative_vehicles = int(total_vehicles * pct)
-                    yearly_new = cumulative_vehicles - prev_cumulative
-                    yearly_counts.append(yearly_new)
-                    prev_cumulative = cumulative_vehicles
-                
-                chart_data.add_series(weight_class, yearly_counts)
-        
-        # Add chart to slide
+        chart_data.categories = year_labels
+
+        # Ensure consistent ordering
+        for wc in ['Light Duty', 'Medium Duty', 'Heavy Duty']:
+            if wc in data:
+                counts = [data[wc].get(y, 0) for y in years]
+                chart_data.add_series(wc, counts)
+
         chart = slide.shapes.add_chart(
             XL_CHART_TYPE.COLUMN_STACKED,
             Inches(left), Inches(top),
             Inches(width), Inches(height),
             chart_data
         ).chart
-        
-        # Format chart with improved styling
+
         chart.has_legend = True
         chart.legend.position = XL_LEGEND_POSITION.BOTTOM
         chart.legend.font.size = Pt(10)
         chart.chart_title.text_frame.text = "Electrification Timeline by Weight Class"
         chart.chart_title.text_frame.paragraphs[0].font.size = Pt(14)
         chart.chart_title.text_frame.paragraphs[0].font.bold = True
-        
-        # Format axes
+
         chart.value_axis.axis_title.text_frame.text = "Vehicles Electrified"
         chart.value_axis.axis_title.text_frame.paragraphs[0].font.size = Pt(11)
         chart.category_axis.axis_title.text_frame.text = "Year"
         chart.category_axis.axis_title.text_frame.paragraphs[0].font.size = Pt(11)
-        
-        # Apply brand colors to series
+
         colors = [PRIMARY_HEX_1, PRIMARY_HEX_3, SECONDARY_HEX_1]
         for i, series in enumerate(chart.series):
             color_hex = colors[i % len(colors)]
             r, g, b = tuple(int(color_hex.lstrip('#')[j:j+2], 16) for j in (0, 2, 4))
             series.format.fill.solid()
             series.format.fill.fore_color.rgb = RGBColor(r, g, b)
-        
+
         return True
-        
+
     except Exception as e:
         logger.error(f"Failed to create electrification timeline by weight chart: {e}")
         return False
@@ -320,98 +347,88 @@ def add_electrification_timeline_by_weight_chart(slide, vehicles: List[FleetVehi
 def add_electrification_timeline_by_body_type_chart(slide, vehicles: List[FleetVehicle],
                                                   left: float = 1, top: float = 2,
                                                   width: float = 8, height: float = 4) -> bool:
-    """Add stacked bar chart showing electrification timeline by body type."""
+    """Add stacked bar chart showing electrification timeline by body type.
+
+    Uses actual Proposed EV Year from vehicle custom_fields, grouped by
+    the top 5 body classes.
+    """
     try:
         if not vehicles:
             return False
-        
-        # Count vehicles by body type (top 5 most common)
-        body_counts = {}
-        for vehicle in vehicles:
-            body_type = getattr(vehicle.vehicle_id, 'body_class', 'Unknown') or 'Unknown'
-            body_counts[body_type] = body_counts.get(body_type, 0) + 1
-        
-        # Get top 5 body types
-        top_body_types = dict(sorted(body_counts.items(), key=lambda x: x[1], reverse=True)[:5])
-        
-        if not top_body_types:
-            return False
-        
-        # Create electrification timeline (10 years)
+
         current_year = datetime.now().year
-        years = [str(year) for year in range(current_year + 1, current_year + 11)]
-        
-        # Electrification schedule by body type (based on typical fleet priorities)
-        body_type_schedules = {
-            'Sedan': [0.15, 0.35, 0.55, 0.75, 0.90, 0.98, 1.0, 1.0, 1.0, 1.0],
-            'SUV': [0.12, 0.30, 0.50, 0.70, 0.85, 0.95, 1.0, 1.0, 1.0, 1.0],
-            'Pickup': [0.08, 0.20, 0.35, 0.55, 0.75, 0.90, 0.98, 1.0, 1.0, 1.0],
-            'Van': [0.05, 0.15, 0.30, 0.50, 0.70, 0.85, 0.95, 1.0, 1.0, 1.0],
-            'Truck': [0.03, 0.10, 0.22, 0.38, 0.58, 0.75, 0.88, 0.96, 1.0, 1.0]
-        }
-        
-        # Default schedule for unknown body types
-        default_schedule = [0.06, 0.18, 0.32, 0.50, 0.68, 0.82, 0.92, 0.98, 1.0, 1.0]
-        
-        # Create chart data
+
+        # Build body_type -> year -> count from real data
+        data = {}  # {body_type: {year: count}}
+        all_years = set()
+
+        for v in vehicles:
+            ev_year_str = v.custom_fields.get("Proposed EV Year", "")
+            try:
+                ev_year = int(ev_year_str)
+            except (ValueError, TypeError):
+                continue
+            if ev_year <= current_year or ev_year > current_year + 20:
+                continue
+
+            body_type = getattr(v.vehicle_id, 'body_class', 'Unknown') or 'Unknown'
+            data.setdefault(body_type, {})
+            data[body_type][ev_year] = data[body_type].get(ev_year, 0) + 1
+            all_years.add(ev_year)
+
+        if not all_years or not data:
+            return False
+
+        # Top 5 body types by total scheduled vehicles
+        sorted_types = sorted(data.items(), key=lambda x: sum(x[1].values()), reverse=True)
+        top_types = sorted_types[:5]
+        if len(sorted_types) > 5:
+            # Merge remaining into "Other"
+            other = {}
+            for _, year_counts in sorted_types[5:]:
+                for y, c in year_counts.items():
+                    other[y] = other.get(y, 0) + c
+            if other:
+                top_types.append(("Other", other))
+
+        years = sorted(all_years)
+        year_labels = [str(y) for y in years]
+
         chart_data = CategoryChartData()
-        chart_data.categories = years
-        
-        for body_type, total_vehicles in top_body_types.items():
-            if total_vehicles > 0:
-                # Find appropriate schedule
-                schedule = None
-                for key, sched in body_type_schedules.items():
-                    if key.lower() in body_type.lower():
-                        schedule = sched
-                        break
-                
-                if schedule is None:
-                    schedule = default_schedule
-                
-                yearly_counts = []
-                prev_cumulative = 0
-                
-                for pct in schedule:
-                    cumulative_vehicles = int(total_vehicles * pct)
-                    yearly_new = cumulative_vehicles - prev_cumulative
-                    yearly_counts.append(yearly_new)
-                    prev_cumulative = cumulative_vehicles
-                
-                chart_data.add_series(body_type, yearly_counts)
-        
-        # Add chart to slide
+        chart_data.categories = year_labels
+
+        for body_type, year_counts in top_types:
+            counts = [year_counts.get(y, 0) for y in years]
+            chart_data.add_series(body_type, counts)
+
         chart = slide.shapes.add_chart(
             XL_CHART_TYPE.COLUMN_STACKED,
             Inches(left), Inches(top),
             Inches(width), Inches(height),
             chart_data
         ).chart
-        
-        # Format chart with improved styling
+
         chart.has_legend = True
         chart.legend.position = XL_LEGEND_POSITION.BOTTOM
-        chart.legend.font.size = Pt(9)  # Smaller for more body types
+        chart.legend.font.size = Pt(9)
         chart.chart_title.text_frame.text = "Electrification Timeline by Body Type"
         chart.chart_title.text_frame.paragraphs[0].font.size = Pt(14)
         chart.chart_title.text_frame.paragraphs[0].font.bold = True
-        
-        # Format axes
+
         chart.value_axis.axis_title.text_frame.text = "Vehicles Electrified"
         chart.value_axis.axis_title.text_frame.paragraphs[0].font.size = Pt(11)
         chart.category_axis.axis_title.text_frame.text = "Year"
         chart.category_axis.axis_title.text_frame.paragraphs[0].font.size = Pt(11)
-        
-        # Apply diverse colors for body types
+
         colors = [PRIMARY_HEX_1, PRIMARY_HEX_3, SECONDARY_HEX_1, '#4ECDC4', '#95E1D3', '#F38BA8', '#A8E6CF', '#FFD93D']
         for i, series in enumerate(chart.series):
             color_hex = colors[i % len(colors)]
             r, g, b = tuple(int(color_hex.lstrip('#')[j:j+2], 16) for j in (0, 2, 4))
             series.format.fill.solid()
             series.format.fill.fore_color.rgb = RGBColor(r, g, b)
-        
+
         return True
-        
+
     except Exception as e:
         logger.error(f"Failed to create electrification timeline by body type chart: {e}")
         return False
@@ -482,6 +499,292 @@ def add_age_distribution_chart(slide, vehicles: List[FleetVehicle],
         return False
 
 ###############################################################################
+# Financial Charts (Phase 9C/9D)
+###############################################################################
+
+def add_tco_comparison_chart(slide, vehicles: List[FleetVehicle],
+                            left: float = 1, top: float = 2,
+                            width: float = 8, height: float = 4) -> bool:
+    """Add stacked bar chart comparing fleet-wide ICE vs EV TCO.
+
+    Reads EV equivalent pricing from custom_fields (set by ev_database.py).
+    Shows purchase, fuel, and maintenance cost components side-by-side.
+    """
+    try:
+        if not vehicles:
+            return False
+
+        from analysis.calculations import (
+            calculate_annual_fuel_cost, calculate_annual_ev_cost,
+            DEFAULT_ICE_MAINTENANCE, DEFAULT_EV_MAINTENANCE,
+            DEFAULT_ANNUAL_MILEAGE, DEFAULT_VEHICLE_LIFESPAN
+        )
+
+        ice_purchase = 0.0
+        ice_fuel = 0.0
+        ice_maint = 0.0
+        ev_purchase = 0.0
+        ev_fuel = 0.0
+        ev_maint = 0.0
+        counted = 0
+
+        for v in vehicles:
+            ev_price = v.custom_fields.get("_ev_purchase_price")
+            ice_price = v.custom_fields.get("_ice_purchase_price")
+            if not ev_price or not ice_price:
+                continue
+            if not v.fuel_economy.combined_mpg:
+                continue
+
+            counted += 1
+            years = DEFAULT_VEHICLE_LIFESPAN
+            mileage = v.annual_mileage or DEFAULT_ANNUAL_MILEAGE
+
+            ice_purchase += float(ice_price)
+            ev_purchase += float(ev_price)
+            ice_fuel += calculate_annual_fuel_cost(v) * years
+            ev_fuel += calculate_annual_ev_cost(v) * years
+            ice_maint += mileage * DEFAULT_ICE_MAINTENANCE * years
+            ev_maint += mileage * DEFAULT_EV_MAINTENANCE * years
+
+        if counted == 0:
+            return False
+
+        chart_data = CategoryChartData()
+        chart_data.categories = ['ICE Fleet', 'EV Fleet']
+        chart_data.add_series('Purchase', [round(ice_purchase), round(ev_purchase)])
+        chart_data.add_series('Fuel / Energy', [round(ice_fuel), round(ev_fuel)])
+        chart_data.add_series('Maintenance', [round(ice_maint), round(ev_maint)])
+
+        chart = slide.shapes.add_chart(
+            XL_CHART_TYPE.COLUMN_STACKED,
+            Inches(left), Inches(top),
+            Inches(width), Inches(height),
+            chart_data
+        ).chart
+
+        chart.has_legend = True
+        chart.legend.position = XL_LEGEND_POSITION.BOTTOM
+        chart.legend.font.size = Pt(10)
+        chart.chart_title.text_frame.text = f"Total Cost of Ownership — {DEFAULT_VEHICLE_LIFESPAN}-Year Comparison ({counted} vehicles)"
+        chart.chart_title.text_frame.paragraphs[0].font.size = Pt(13)
+        chart.chart_title.text_frame.paragraphs[0].font.bold = True
+
+        chart.value_axis.axis_title.text_frame.text = "Total Cost ($)"
+        chart.value_axis.axis_title.text_frame.paragraphs[0].font.size = Pt(11)
+
+        colors = [PRIMARY_HEX_1, SECONDARY_HEX_1, PRIMARY_HEX_3]
+        for i, series in enumerate(chart.series):
+            color_hex = colors[i % len(colors)]
+            r, g, b = tuple(int(color_hex.lstrip('#')[j:j+2], 16) for j in (0, 2, 4))
+            series.format.fill.solid()
+            series.format.fill.fore_color.rgb = RGBColor(r, g, b)
+
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to create TCO comparison chart: {e}")
+        return False
+
+
+def add_payback_timeline_chart(slide, vehicles: List[FleetVehicle],
+                               left: float = 1, top: float = 2,
+                               width: float = 8, height: float = 4) -> bool:
+    """Add line chart showing cumulative ICE vs EV fleet cost over time.
+
+    Uses the year-by-year cash flow model to show when the EV fleet
+    becomes cheaper than the ICE fleet (crossover point).
+    """
+    try:
+        if not vehicles:
+            return False
+
+        from analysis.calculations import (
+            calculate_yearly_cash_flows, DEFAULT_VEHICLE_LIFESPAN
+        )
+
+        years_count = DEFAULT_VEHICLE_LIFESPAN
+        ice_cumulative = [0.0] * (years_count + 1)
+        ev_cumulative = [0.0] * (years_count + 1)
+        counted = 0
+
+        for v in vehicles:
+            ev_price = v.custom_fields.get("_ev_purchase_price")
+            ice_price = v.custom_fields.get("_ice_purchase_price")
+            if not ev_price or not ice_price or not v.fuel_economy.combined_mpg:
+                continue
+
+            counted += 1
+            cf = calculate_yearly_cash_flows(
+                vehicle=v,
+                ev_purchase_price=float(ev_price),
+                ice_purchase_price=float(ice_price),
+            )
+
+            for row in cf["yearly_flows"]:
+                y = row["year"]
+                if y <= years_count:
+                    ice_cumulative[y] += row["ice_cumulative"]
+                    ev_cumulative[y] += row["ev_cumulative"]
+
+        if counted == 0:
+            return False
+
+        year_labels = [f"Year {y}" for y in range(years_count + 1)]
+
+        chart_data = CategoryChartData()
+        chart_data.categories = year_labels
+        chart_data.add_series('ICE Fleet Cost', [round(v) for v in ice_cumulative])
+        chart_data.add_series('EV Fleet Cost', [round(v) for v in ev_cumulative])
+
+        chart = slide.shapes.add_chart(
+            XL_CHART_TYPE.LINE,
+            Inches(left), Inches(top),
+            Inches(width), Inches(height),
+            chart_data
+        ).chart
+
+        chart.has_legend = True
+        chart.legend.position = XL_LEGEND_POSITION.BOTTOM
+        chart.legend.font.size = Pt(10)
+        chart.chart_title.text_frame.text = f"Cumulative Fleet Cost — ICE vs EV ({counted} vehicles)"
+        chart.chart_title.text_frame.paragraphs[0].font.size = Pt(13)
+        chart.chart_title.text_frame.paragraphs[0].font.bold = True
+
+        chart.value_axis.axis_title.text_frame.text = "Cumulative Cost ($)"
+        chart.value_axis.axis_title.text_frame.paragraphs[0].font.size = Pt(11)
+        chart.category_axis.axis_title.text_frame.text = ""
+
+        # ICE line
+        ice_series = chart.series[0]
+        ice_series.format.line.color.rgb = RGBColor(*tuple(int(SECONDARY_HEX_1.lstrip('#')[j:j+2], 16) for j in (0, 2, 4)))
+        ice_series.format.line.width = Pt(3)
+
+        # EV line
+        ev_series = chart.series[1]
+        ev_series.format.line.color.rgb = RGBColor(*tuple(int(PRIMARY_HEX_3.lstrip('#')[j:j+2], 16) for j in (0, 2, 4)))
+        ev_series.format.line.width = Pt(3)
+
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to create payback timeline chart: {e}")
+        return False
+
+
+###############################################################################
+# Scenario Comparison Charts (Phase 9E)
+###############################################################################
+
+def add_scenario_comparison_chart(slide, scenario_results: list,
+                                   left: float = 1, top: float = 2,
+                                   width: float = 8, height: float = 4,
+                                   metric: str = "vehicles") -> bool:
+    """Add a multi-line chart comparing electrification scenarios.
+
+    Args:
+        slide: PowerPoint slide object
+        scenario_results: List of scenario result dicts (from scenarios.run_scenario)
+        left/top/width/height: Chart positioning in inches
+        metric: Which metric to chart:
+            "vehicles" - cumulative vehicles electrified
+            "cost" - cumulative investment
+            "co2" - cumulative CO₂ reduction (MT/yr)
+            "savings" - cumulative annual savings
+    """
+    try:
+        if not scenario_results:
+            return False
+
+        # Collect all years across scenarios
+        all_years = set()
+        for r in scenario_results:
+            if metric == "vehicles":
+                all_years.update(r.get("cumulative_vehicles", {}).keys())
+            elif metric == "cost":
+                all_years.update(r.get("cumulative_cost", {}).keys())
+            elif metric == "co2":
+                all_years.update(r.get("cumulative_co2_reduction", {}).keys())
+            elif metric == "savings":
+                all_years.update(r.get("cumulative_savings", {}).keys())
+
+        if not all_years:
+            return False
+
+        years = sorted(all_years)
+        year_labels = [str(y) for y in years]
+
+        chart_data = CategoryChartData()
+        chart_data.categories = year_labels
+
+        # Data key mapping
+        data_keys = {
+            "vehicles": "cumulative_vehicles",
+            "cost": "cumulative_cost",
+            "co2": "cumulative_co2_reduction",
+            "savings": "cumulative_savings",
+        }
+        data_key = data_keys.get(metric, "cumulative_vehicles")
+
+        for r in scenario_results:
+            values = r.get(data_key, {})
+            series_data = [values.get(y, 0) for y in years]
+            if metric in ("cost", "savings"):
+                series_data = [round(v) for v in series_data]
+            elif metric == "co2":
+                series_data = [round(v, 1) for v in series_data]
+            chart_data.add_series(r["name"], series_data)
+
+        chart = slide.shapes.add_chart(
+            XL_CHART_TYPE.LINE,
+            Inches(left), Inches(top),
+            Inches(width), Inches(height),
+            chart_data
+        ).chart
+
+        # Titles
+        titles = {
+            "vehicles": "Vehicles Electrified by Scenario",
+            "cost": "Cumulative Investment by Scenario",
+            "co2": "Cumulative CO₂ Reduction by Scenario (MT/yr)",
+            "savings": "Cumulative Annual Savings by Scenario",
+        }
+        y_labels = {
+            "vehicles": "Vehicles",
+            "cost": "Total Investment ($)",
+            "co2": "CO₂ Reduction (MT/yr)",
+            "savings": "Annual Savings ($)",
+        }
+
+        chart.chart_title.text_frame.text = titles.get(metric, "Scenario Comparison")
+        chart.chart_title.text_frame.paragraphs[0].font.size = Pt(13)
+        chart.chart_title.text_frame.paragraphs[0].font.bold = True
+
+        chart.has_legend = True
+        chart.legend.position = XL_LEGEND_POSITION.BOTTOM
+        chart.legend.font.size = Pt(9)
+
+        chart.value_axis.axis_title.text_frame.text = y_labels.get(metric, "")
+        chart.value_axis.axis_title.text_frame.paragraphs[0].font.size = Pt(10)
+        chart.category_axis.axis_title.text_frame.text = "Year"
+        chart.category_axis.axis_title.text_frame.paragraphs[0].font.size = Pt(10)
+
+        # Color each scenario line
+        colors = [PRIMARY_HEX_1, PRIMARY_HEX_3, SECONDARY_HEX_1, '#4ECDC4', '#F38BA8']
+        for i, series in enumerate(chart.series):
+            color_hex = colors[i % len(colors)]
+            r, g, b = tuple(int(color_hex.lstrip('#')[j:j+2], 16) for j in (0, 2, 4))
+            series.format.line.color.rgb = RGBColor(r, g, b)
+            series.format.line.width = Pt(2.5)
+
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to create scenario comparison chart: {e}")
+        return False
+
+
+###############################################################################
 # Chart Configuration and Customization
 ###############################################################################
 
@@ -549,6 +852,30 @@ class SlideConfiguration:
                 'description': 'Implementation timeline and recommendations',
                 'required': False,
                 'charts': []
+            },
+            'financial_summary': {
+                'name': 'Financial Summary',
+                'description': 'TCO comparison and payback analysis',
+                'required': False,
+                'charts': ['stacked_bar_tco', 'line_payback']
+            },
+            'executive_recommendations': {
+                'name': 'Executive Recommendations',
+                'description': 'Data-driven replacement recommendations with top priority vehicles',
+                'required': False,
+                'charts': []
+            },
+            'replacement_schedule': {
+                'name': 'Replacement Schedule',
+                'description': 'Top 12-15 priority vehicles with EV equivalents and savings',
+                'required': False,
+                'charts': []
+            },
+            'scenario_comparison': {
+                'name': 'Scenario Comparison',
+                'description': 'Side-by-side comparison of electrification timeline scenarios',
+                'required': False,
+                'charts': ['line_scenario_vehicles', 'line_scenario_cost']
             }
         }
         
@@ -582,17 +909,39 @@ class SlideConfiguration:
                 'name': 'Age Distribution (Column)',
                 'description': 'Column chart showing fleet age distribution',
                 'function': add_age_distribution_chart
+            },
+            'stacked_bar_tco': {
+                'name': 'TCO Comparison (Stacked Bar)',
+                'description': 'ICE vs EV total cost of ownership breakdown',
+                'function': add_tco_comparison_chart
+            },
+            'line_payback': {
+                'name': 'Payback Timeline (Line)',
+                'description': 'Cumulative cost curves showing breakeven point',
+                'function': add_payback_timeline_chart
+            },
+            'line_scenario_vehicles': {
+                'name': 'Scenario Comparison — Vehicles (Line)',
+                'description': 'Multi-scenario cumulative vehicle electrification',
+                'function': add_scenario_comparison_chart
+            },
+            'line_scenario_cost': {
+                'name': 'Scenario Comparison — Cost (Line)',
+                'description': 'Multi-scenario cumulative investment',
+                'function': add_scenario_comparison_chart
             }
         }
         
         # Default configuration
         self.selected_slides = [
             'cover',
-            'fleet_snapshot', 
+            'fleet_snapshot',
             'fleet_composition',
+            'financial_summary',
             'emissions_timeline',
             'emissions_by_weight',
             'electrification_timeline_weight',
+            'replacement_schedule',
             'age_analysis',
             'next_steps'
         ]
@@ -613,9 +962,14 @@ class SlideConfiguration:
             logger.error(f"Invalid slide IDs: {invalid_slides}")
             return False
         
-        # Ensure required slides are included
+        # Ensure required slides are included while preserving user's order
         required_slides = [sid for sid, info in self.available_slides.items() if info['required']]
-        final_slides = list(set(slide_ids + required_slides))
+        seen = set()
+        final_slides = []
+        for sid in slide_ids + required_slides:
+            if sid not in seen:
+                final_slides.append(sid)
+                seen.add(sid)
         
         self.selected_slides = final_slides
         return True

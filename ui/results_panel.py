@@ -6,6 +6,7 @@ Fleet Electrification Analyzer.
 """
 
 import logging
+import os
 import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import Dict, List, Any, Optional, Callable, Tuple
@@ -72,137 +73,103 @@ class ResultsPanel(ttk.Frame):
         self._create_context_menu()
     
     def _create_toolbar(self):
-        """Create the toolbar with search, filters, and actions."""
-        # Create toolbar frame
+        """Create the toolbar with search, filters, and export."""
         toolbar = ttk.Frame(self)
-        toolbar.pack(fill=tk.X, padx=Spacing.MARGIN_ELEMENT, pady=(Spacing.MARGIN_ELEMENT, Spacing.SM))
-        
-        # Left side - search and filters
+        toolbar.pack(fill=tk.X, padx=Spacing.MARGIN_ELEMENT,
+                     pady=(Spacing.MARGIN_ELEMENT, Spacing.SM))
+
+        # ── Left: Search ────────────────────────────────────────────
         search_frame = ttk.Frame(toolbar)
         search_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
-        # Search controls
-        ttk.Label(search_frame, text="Search:").pack(side=tk.LEFT, padx=(0, 5))
-        
-        search_entry = ttk.Entry(
-            search_frame, 
-            textvariable=self.search_var,
-            width=30
-        )
-        search_entry.pack(side=tk.LEFT, padx=(0, Spacing.SM))
-        SimpleTooltip(search_entry, "Search by VIN, make, model, or any vehicle attribute\nResults update automatically as you type")
-        
-        # Bind search entry to filter data
+
+        ttk.Label(search_frame, text="Search:").pack(side=tk.LEFT, padx=(0, Spacing.XS))
+
+        search_entry = ttk.Entry(search_frame, textvariable=self.search_var, width=25)
+        search_entry.pack(side=tk.LEFT, padx=(0, Spacing.XS))
+        SimpleTooltip(search_entry, "Search across all visible columns — updates as you type")
         self.search_var.trace_add("write", lambda *args: self._apply_filter())
-        
-        # Search fields dropdown
-        ttk.Label(search_frame, text="in:").pack(side=tk.LEFT, padx=(5, 2))
-        
+
+        ttk.Label(search_frame, text="in:").pack(side=tk.LEFT, padx=(Spacing.XS, 2))
         search_fields = ttk.Combobox(
             search_frame,
             textvariable=self.search_fields_var,
             values=["all", "VIN", "Make", "Model", "Year", "Asset ID", "Department"],
-            width=10,
-            state="readonly"
+            width=10, state="readonly"
         )
-        search_fields.pack(side=tk.LEFT, padx=(0, 10))
-        SimpleTooltip(search_fields, "Select fields to search in")
-        
-        # Bind search fields to apply filter
+        search_fields.pack(side=tk.LEFT, padx=(0, Spacing.MD))
         search_fields.bind("<<ComboboxSelected>>", lambda e: self._apply_filter())
-        
-        # Quick filters
-        filters_frame = ttk.LabelFrame(search_frame, text="Quick Filters")
-        filters_frame.pack(side=tk.LEFT, padx=(10, 0), pady=2)
-        
-        # Status filter
-        ttk.Label(filters_frame, text="Status:").pack(side=tk.LEFT, padx=(Spacing.SM, 2))
+
+        # ── Middle: Filters (compact, no LabelFrame) ───────────────
+        sep = ttk.Separator(search_frame, orient=tk.VERTICAL)
+        sep.pack(side=tk.LEFT, fill=tk.Y, padx=Spacing.SM, pady=2)
+
+        ttk.Label(search_frame, text="Status:").pack(side=tk.LEFT, padx=(0, 2))
         status_filter = ttk.Combobox(
-            filters_frame,
+            search_frame,
             textvariable=self.status_filter_var,
             values=["all", "successful", "failed"],
-            width=12,
-            state="readonly"
+            width=10, state="readonly"
         )
-        status_filter.pack(side=tk.LEFT, padx=Spacing.SM, pady=Spacing.SM)
-        SimpleTooltip(status_filter, "Filter by VIN processing status\n• Successful: VIN decoded and enriched\n• Failed: VIN lookup failed")
+        status_filter.pack(side=tk.LEFT, padx=(0, Spacing.SM))
+        SimpleTooltip(status_filter, "Filter by processing status")
         status_filter.bind("<<ComboboxSelected>>", lambda e: self._apply_filter())
-        
-        # Quality filter
-        ttk.Label(filters_frame, text="Quality:").pack(side=tk.LEFT, padx=(Spacing.SM, 2))
+
+        ttk.Label(search_frame, text="Quality:").pack(side=tk.LEFT, padx=(0, 2))
         quality_filter = ttk.Combobox(
-            filters_frame,
+            search_frame,
             textvariable=self.quality_filter_var,
-            values=["all", "high quality (80%+)", "medium quality (50-80%)", "low quality (<50%)"],
-            width=18,
-            state="readonly"
+            values=["all", "high (80%+)", "medium (50-80%)", "low (<50%)"],
+            width=13, state="readonly"
         )
-        quality_filter.pack(side=tk.LEFT, padx=Spacing.SM, pady=Spacing.SM)
-        SimpleTooltip(quality_filter, "Filter by data completeness quality\n• High: 80%+ fields populated\n• Medium: 50-80% fields populated\n• Low: <50% fields populated")
+        quality_filter.pack(side=tk.LEFT, padx=(0, Spacing.SM))
+        SimpleTooltip(quality_filter, "Filter by data quality score")
         quality_filter.bind("<<ComboboxSelected>>", lambda e: self._apply_filter())
-        
-        # Right side - actions
-        actions_frame = ttk.Frame(toolbar)
-        actions_frame.pack(side=tk.RIGHT)
-        
-        # Export for Excel Analysis button (PRIMARY GREEN - main export action)
-        excel_export_btn = ttk.Button(
-            actions_frame,
-            text="📊 Export to Excel",
-            command=self._export_for_excel,
+
+        # Reset link (small, next to filters)
+        reset_btn = ttk.Button(
+            search_frame, text="Reset",
+            command=self._clear_filter, width=5
+        )
+        reset_btn.pack(side=tk.LEFT)
+        SimpleTooltip(reset_btn, "Clear all search and filter criteria")
+
+        # ── Right: Export ───────────────────────────────────────────
+        export_btn = ttk.Button(
+            toolbar,
+            text="Export",
+            command=self._export_dialog,
             style="Primary.TButton"
         )
-        excel_export_btn.pack(side=tk.RIGHT, padx=Spacing.SM)
-        SimpleTooltip(excel_export_btn, "Export filtered fleet data to Excel spreadsheet\nOptimized for analysis with proper column order and formatting")
-        
-        # Standard export button (SECONDARY - alternative export)
-        export_btn = ttk.Button(
-            actions_frame,
-            text="Export Options...",
-            command=self._export_data,
-            style="Secondary.TButton"
-        )
         export_btn.pack(side=tk.RIGHT, padx=Spacing.SM)
-        SimpleTooltip(export_btn, "Advanced export with custom format options\nSupports CSV, JSON, and other formats")
-        
-        # Clear filter button (SECONDARY - utility action)
-        clear_btn = ttk.Button(
-            actions_frame,
-            text="Clear Filters",
-            command=self._clear_filter,
-            style="Secondary.TButton"
-        )
-        clear_btn.pack(side=tk.RIGHT, padx=Spacing.SM)
-        SimpleTooltip(clear_btn, "Clear all search filters")
-        
-        # Refresh button
-        refresh_btn = ttk.Button(
-            actions_frame,
-            text="Refresh",
-            command=self.refresh
-        )
-        refresh_btn.pack(side=tk.RIGHT, padx=5)
-        SimpleTooltip(refresh_btn, "Refresh data display")
+        SimpleTooltip(export_btn, "Export fleet data to CSV or Excel")
     
     def _create_summary(self):
-        """Create the processing summary widget."""
-        # Create summary frame
+        """Create the processing summary bar."""
         self.summary_frame = ttk.Frame(self)
         self.summary_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
-        
+
         # Configure summary frame style
         style = ttk.Style()
         style.configure("Summary.TFrame", relief="solid", borderwidth=1)
         self.summary_frame.configure(style="Summary.TFrame")
-        
-        # Create summary label
+
+        # Main summary label (left side)
         self.summary_label = ttk.Label(
             self.summary_frame,
             text="No data loaded",
-            font=("", 10, "bold"),
-            foreground="#2E8B57"  # Sea green color
+            font=(Fonts.FAMILY_SANS, Fonts.SIZE_BODY, "bold"),
+            foreground="#718096"
         )
-        self.summary_label.pack(padx=10, pady=5)
+        self.summary_label.pack(side=tk.LEFT, padx=10, pady=5)
+
+        # Vehicle count badge (right side)
+        self.count_label = ttk.Label(
+            self.summary_frame,
+            text="",
+            font=(Fonts.FAMILY_SANS, Fonts.SIZE_SMALL),
+            foreground=Colors.TEXT_TERTIARY
+        )
+        self.count_label.pack(side=tk.RIGHT, padx=10, pady=5)
     
     def _create_treeview(self):
         """Create the treeview for displaying vehicle data."""
@@ -235,7 +202,7 @@ class ResultsPanel(ttk.Frame):
         v_scrollbar.config(command=self.tree.yview)
         h_scrollbar.config(command=self.tree.xview)
         
-        # Configure columns and headings
+        # Configure columns and headings with content-aware widths
         for col in self.visible_columns:
             display_name = self.all_columns_map.get(col, col)
             self.tree.heading(
@@ -243,10 +210,10 @@ class ResultsPanel(ttk.Frame):
                 text=display_name,
                 command=lambda c=col: self._sort_by_column(c)
             )
-            
-            # Adjust column width based on content
-            width = max(100, len(display_name) * 10)
-            self.tree.column(col, width=width, minwidth=50)
+
+            # Content-aware column widths
+            width, anchor = self._get_column_width_and_anchor(col, display_name)
+            self.tree.column(col, width=width, minwidth=50, anchor=anchor)
         
         # Configure color tags for data quality indication
         self.tree.tag_configure("failed", background="#FFE4E1")  # Light red for failed
@@ -297,18 +264,88 @@ class ResultsPanel(ttk.Frame):
         self.tree.bind("<Button-3>", self._show_context_menu)
     
     def _build_column_map(self):
-        """Build the mapping of all possible columns to display names."""
+        """Build the mapping of all possible columns to display names.
+
+        Unions keys across all vehicles (not just the first) so that
+        custom_fields columns like ACF Category are discovered even if
+        the first vehicle's processing failed.  Caps the scan at 50
+        vehicles for performance on very large fleets.
+        """
         # Start with column map from settings
         self.all_columns_map = dict(COLUMN_NAME_MAP)
-        
-        # Add any missing columns based on data
+
+        # Add any missing columns based on data — sample multiple vehicles
         if self.data:
-            sample = self.data[0].to_row_dict()
-            for key in sample.keys():
-                if key not in self.all_columns_map:
-                    # Use the key itself as display name
-                    self.all_columns_map[key] = key
-    
+            sample_size = min(len(self.data), 50)
+            for vehicle in self.data[:sample_size]:
+                for key in vehicle.to_row_dict().keys():
+                    if key not in self.all_columns_map:
+                        self.all_columns_map[key] = key
+
+    @staticmethod
+    def _get_column_width_and_anchor(col_id: str, display_name: str) -> Tuple[int, str]:
+        """
+        Return (pixel_width, anchor) for a column based on its data type.
+        Numeric columns are right-aligned; text columns are left-aligned.
+        VIN gets extra width for its 17-character values.
+        """
+        # Column width presets based on expected content
+        COLUMN_WIDTHS = {
+            # Wide columns — long text values
+            "VIN": 170,
+            "BodyClass": 150,
+            "GVWR": 160,
+            "Commercial Summary": 180,
+            "Processing Error": 200,
+            "Assumed Vehicle (Text)": 180,
+            # Medium columns — short text
+            "Make": 100,
+            "Model": 120,
+            "FuelTypePrimary": 120,
+            "Department": 120,
+            "Location": 120,
+            "Asset ID": 100,
+            "Commercial Category": 130,
+            "Vehicle Class": 110,
+            # Narrow columns — short numeric / coded values
+            "Year": 70,
+            "MPG City": 80,
+            "MPG Highway": 90,
+            "MPG Combined": 100,
+            "CO2 emissions": 90,
+            "GVWR (lbs)": 95,
+            "Data Quality": 90,
+            "Processing Status": 110,
+            "Odometer": 95,
+            "Annual Mileage": 105,
+            "Is Diesel": 75,
+            "Is Commercial": 90,
+            # Match quality
+            "Match Confidence": 110,
+            "Fuel Type Mismatch": 180,
+            # ACF compliance & electrification
+            "ACF Category": 140,
+            "ACF Detail": 220,
+            "Proposed EV Year": 115,
+            # EV equivalent matching
+            "EV Equivalent": 180,
+            "EV MSRP Range": 150,
+            "EV EPA Range": 100,
+            "EV Fit Score": 100,
+        }
+
+        # Right-align numeric columns
+        NUMERIC_COLUMNS = {
+            "Year", "MPG City", "MPG Highway", "MPG Combined",
+            "CO2 emissions", "co2A", "GVWR (lbs)", "Odometer",
+            "Annual Mileage", "rangeA", "Engine HP",
+            "Proposed EV Year", "Match Confidence",
+        }
+
+        width = COLUMN_WIDTHS.get(col_id, max(100, len(display_name) * 9))
+        anchor = "e" if col_id in NUMERIC_COLUMNS else "w"
+        return width, anchor
+
     def _sort_by_column(self, column):
         """
         Sort treeview data by specified column.
@@ -384,22 +421,19 @@ class ResultsPanel(ttk.Frame):
         for vehicle in self.data:
             # Apply status filter
             if status_filter != "all":
-                vehicle_success = (vehicle.vehicle_id.year and 
-                                 vehicle.vehicle_id.make and 
-                                 vehicle.vehicle_id.model)
-                if status_filter == "successful" and not vehicle_success:
+                if status_filter == "successful" and not vehicle.processing_success:
                     continue
-                if status_filter == "failed" and vehicle_success:
+                if status_filter == "failed" and vehicle.processing_success:
                     continue
             
             # Apply quality filter
             if quality_filter != "all":
                 quality_score = getattr(vehicle, 'data_quality_score', 0)
-                if quality_filter == "high quality (80%+)" and quality_score < 80:
+                if quality_filter.startswith("high") and quality_score < 80:
                     continue
-                if quality_filter == "medium quality (50-80%)" and (quality_score < 50 or quality_score >= 80):
+                if quality_filter.startswith("medium") and (quality_score < 50 or quality_score >= 80):
                     continue
-                if quality_filter == "low quality (<50%)" and quality_score >= 50:
+                if quality_filter.startswith("low") and quality_score >= 50:
                     continue
             
             # Apply search filter
@@ -463,24 +497,53 @@ class ResultsPanel(ttk.Frame):
     def _update_summary_filtered(self, filtered_count: int) -> None:
         """
         Update the summary display for filtered results.
-        
+
+        When a filter is active, shows stats (success/fail counts, avg MPG,
+        unique makes) computed from the *filtered* subset — not the full fleet.
+
         Args:
             filtered_count: Number of items after filtering
         """
         if not self.data:
             self.summary_label.config(text="No data loaded")
             return
-        
+
         total_count = len(self.data)
-        
+
         if filtered_count == total_count:
-            # No filtering applied, use normal summary
+            # No filtering applied — use normal full-fleet summary
             self._update_summary()
+            return
+
+        # Compute stats from the filtered vehicles only
+        filtered_vehicles = list(self.data_map.values())
+        successful = [v for v in filtered_vehicles if v.processing_success]
+        failed_count = filtered_count - len(successful)
+
+        mpg_values = [v.fuel_economy.combined_mpg for v in successful
+                      if v.fuel_economy.combined_mpg > 0]
+        avg_mpg = sum(mpg_values) / len(mpg_values) if mpg_values else 0
+
+        unique_makes = len({v.vehicle_id.make for v in successful
+                           if v.vehicle_id.make})
+
+        # Build summary parts
+        parts = [f"Showing {filtered_count} of {total_count}"]
+        if failed_count > 0:
+            parts.append(f"✗ {failed_count} failed")
+        if unique_makes > 0:
+            parts.append(f"{unique_makes} make{'s' if unique_makes != 1 else ''}")
+        if avg_mpg > 0:
+            parts.append(f"Avg MPG: {avg_mpg:.1f}")
+
+        text_color = "#4682B4"  # Steel blue for filtered results
+        self.summary_label.config(text="  ·  ".join(parts), foreground=text_color)
+
+        mpg_count = len(mpg_values)
+        if mpg_count > 0 and mpg_count < len(successful):
+            self.count_label.config(text=f"MPG data for {mpg_count}/{len(successful)}")
         else:
-            # Show filtered results
-            summary_text = f"📊 Showing {filtered_count} of {total_count} vehicles"
-            text_color = "#4682B4"  # Steel blue for filtered results
-            self.summary_label.config(text=summary_text, foreground=text_color)
+            self.count_label.config(text=f"filtered from {total_count}")
     
     def _clear_filter(self):
         """Clear search filter and quick filters."""
@@ -489,58 +552,123 @@ class ResultsPanel(ttk.Frame):
         self.quality_filter_var.set("all")
         self.populate_data()
     
-    def _export_data(self):
-        """Export the currently displayed data."""
-        # Get parent window to show dialog
+    def _export_dialog(self):
+        """Unified export: CSV or Excel via a single save dialog."""
         from tkinter import filedialog
-        
-        filepath = filedialog.asksaveasfilename(
-            title="Export Data",
-            defaultextension=".csv",
-            filetypes=[
-                ("CSV Files", "*.csv"),
-                ("Excel Files", "*.xlsx"),
-                ("All Files", "*.*")
-            ]
-        )
-        
-        if not filepath:
-            return
-        
-        # Get currently displayed data
+        import csv
+        import datetime
+
+        # Get currently displayed data (respects active filters/sorting)
         displayed_vehicles = []
         for iid in self.tree.get_children():
             if iid in self.data_map:
                 displayed_vehicles.append(self.data_map[iid])
-        
-        # Get visible columns
-        visible_columns = self.visible_columns
-        
-        # Export the data
-        from analysis.reports import ReportGeneratorFactory
-        
-        generator = ReportGeneratorFactory.create_generator(filepath)
-        if generator:
-            success = generator.generate(
-                fleet=displayed_vehicles,
-                fields=visible_columns
-            )
-            
-            if success:
-                messagebox.showinfo(
-                    "Export Complete",
-                    f"Data has been exported to:\n{filepath}"
-                )
+
+        if not displayed_vehicles:
+            messagebox.showwarning("No Data", "No data to export.")
+            return
+
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        filepath = filedialog.asksaveasfilename(
+            title="Export Fleet Data",
+            initialfile=f"fleet_analysis_{timestamp}",
+            defaultextension=".csv",
+            filetypes=[
+                ("CSV (Excel compatible)", "*.csv"),
+                ("Excel Workbook", "*.xlsx"),
+            ]
+        )
+
+        if not filepath:
+            return
+
+        try:
+            if filepath.lower().endswith('.xlsx'):
+                self._write_xlsx(filepath, displayed_vehicles)
             else:
-                messagebox.showerror(
-                    "Export Failed",
-                    "An error occurred while exporting the data."
-                )
-        else:
-            messagebox.showerror(
-                "Export Failed",
-                "Unsupported file format."
+                self._write_csv(filepath, displayed_vehicles)
+
+            messagebox.showinfo(
+                "Export Complete",
+                f"Exported {len(displayed_vehicles)} vehicles to:\n{os.path.basename(filepath)}"
             )
+        except Exception as e:
+            logger.error(f"Export failed: {e}")
+            messagebox.showerror("Export Failed", f"Error exporting data:\n{e}")
+
+    def _get_export_columns(self, displayed_vehicles):
+        """Build ordered column list for export."""
+        # Core columns in a logical order
+        export_cols = [
+            "VIN", "Processing Status", "Data Quality", "Year", "Make", "Model",
+            "FuelTypePrimary", "BodyClass", "GVWR",
+            "MPG Combined", "MPG City", "MPG Highway",
+            "CO2 emissions", "Asset ID", "Department", "Location",
+            "Odometer", "Annual Mileage", "Processing Error"
+        ]
+        # Append any custom fields not already listed
+        if displayed_vehicles:
+            sample = displayed_vehicles[0].to_row_dict()
+            skip = {"co2A", "rangeA", "Assumed Vehicle (Text)", "Assumed Vehicle (ID)"}
+            for key in sample:
+                if key not in export_cols and key not in skip:
+                    export_cols.append(key)
+        return export_cols
+
+    def _write_csv(self, filepath, vehicles):
+        """Write vehicles to CSV with UTF-8 BOM for Excel compatibility."""
+        import csv
+        columns = self._get_export_columns(vehicles)
+        with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
+            writer = csv.writer(f)
+            writer.writerow(columns)
+            for v in vehicles:
+                row = v.to_row_dict()
+                writer.writerow([row.get(c, "") for c in columns])
+
+    def _write_xlsx(self, filepath, vehicles):
+        """Write vehicles to an Excel workbook (requires openpyxl)."""
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, PatternFill, Alignment
+        except ImportError:
+            messagebox.showerror(
+                "Missing Dependency",
+                "Excel export requires the openpyxl package.\n\n"
+                "Install it with: pip install openpyxl\n\n"
+                "Alternatively, export as CSV."
+            )
+            return
+
+        columns = self._get_export_columns(vehicles)
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Fleet Analysis"
+
+        # Header row
+        header_font = Font(bold=True)
+        header_fill = PatternFill(start_color="E8E8E8", end_color="E8E8E8", fill_type="solid")
+        for col_idx, col_name in enumerate(columns, 1):
+            cell = ws.cell(row=1, column=col_idx, value=col_name)
+            cell.font = header_font
+            cell.fill = header_fill
+
+        # Data rows
+        for row_idx, v in enumerate(vehicles, 2):
+            row = v.to_row_dict()
+            for col_idx, col_name in enumerate(columns, 1):
+                ws.cell(row=row_idx, column=col_idx, value=row.get(col_name, ""))
+
+        # Auto-width columns (cap at 40)
+        for col_idx, col_name in enumerate(columns, 1):
+            max_len = len(col_name)
+            for row_idx in range(2, min(len(vehicles) + 2, 52)):  # sample 50 rows
+                val = str(ws.cell(row=row_idx, column=col_idx).value or "")
+                max_len = max(max_len, len(val))
+            ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = min(max_len + 2, 40)
+
+        wb.save(filepath)
     
     def _on_selection_change(self, event):
         """Handle selection change in treeview."""
@@ -883,83 +1011,61 @@ Summary of Selected Vehicles ({len(selected_vehicles)})
     def set_data(self, data):
         """
         Set the data for the results panel.
-        
+
         Args:
-            data: List of FleetVehicle objects or similar data
+            data: List of FleetVehicle objects
         """
-        logger.info(f"🔧 DEBUG: ResultsPanel.set_data() called with {len(data) if data else 0} items")
-        logger.info(f"🔧 DEBUG: set_data called from thread: {threading.current_thread().name}")
-        
-        try:
-            self.data = data or []
-            
-            if self.data:
-                # Log data breakdown for debugging
-                success_count = sum(1 for v in self.data if hasattr(v, 'processing_success') and v.processing_success)
-                failed_count = len(self.data) - success_count
-                logger.info(f"🔧 DEBUG: ResultsPanel data breakdown - Success: {success_count}, Failed: {failed_count}")
-                
-                # Log first few items for debugging
-                for i, item in enumerate(self.data[:3]):
-                    if hasattr(item, 'vin') and hasattr(item, 'processing_success'):
-                        logger.info(f"🔧 DEBUG: Item {i+1}: VIN={item.vin}, Success={item.processing_success}, Error='{getattr(item, 'processing_error', 'N/A')}'")
-            
-            # Update data display
-            logger.info(f"🔧 DEBUG: Calling populate_data() to refresh display")
-            self.populate_data()
-            logger.info(f"🔧 DEBUG: populate_data() completed successfully")
-            
-            logger.info(f"🔧 DEBUG: Calling _update_summary()")
-            self._update_summary()
-            logger.info(f"🔧 DEBUG: _update_summary() completed successfully")
-            
-            # Trigger selection change callback
-            if self.on_selection_change_callback:
-                logger.info(f"🔧 DEBUG: Calling selection change callback")
-                self.on_selection_change_callback([])
-                logger.info(f"🔧 DEBUG: Selection change callback completed")
-                
-            logger.info(f"🔧 DEBUG: ResultsPanel.set_data() completed successfully")
-            
-        except Exception as e:
-            logger.error(f"🔧 DEBUG: Exception in ResultsPanel.set_data(): {e}")
-            logger.error(f"🔧 DEBUG: set_data exception type: {type(e).__name__}")
-            import traceback
-            logger.error(f"🔧 DEBUG: set_data traceback: {traceback.format_exc()}")
-            raise  # Re-raise to see the full error chain
+        self.data = data or []
+        self.populate_data()
+        self._update_summary()
+
+        if self.on_selection_change_callback:
+            self.on_selection_change_callback([])
     
     def _update_summary(self):
-        """Update the processing summary display."""
+        """Update the processing summary display with fleet statistics."""
         if not self.data:
-            self.summary_label.config(text="No data loaded")
+            self.summary_label.config(text="No data loaded", foreground="#718096")
+            self.count_label.config(text="")
             return
-        
+
         total_count = len(self.data)
-        successful_count = 0
-        failed_count = 0
-        
-        # Analyze each vehicle to determine success/failure
-        for vehicle in self.data:
-            # Consider successful if basic vehicle info is present
-            if (vehicle.vehicle_id.year and 
-                vehicle.vehicle_id.make and 
-                vehicle.vehicle_id.model):
-                successful_count += 1
-            else:
-                failed_count += 1
-        
-        # Create summary text with color coding
+        successful_count = sum(1 for v in self.data if v.processing_success)
+        failed_count = total_count - successful_count
+
+        # Gather fleet stats for successful vehicles
+        mpg_values = [v.fuel_economy.combined_mpg for v in self.data
+                      if v.processing_success and v.fuel_economy.combined_mpg > 0]
+        avg_mpg = sum(mpg_values) / len(mpg_values) if mpg_values else 0
+
+        unique_makes = len({v.vehicle_id.make for v in self.data
+                           if v.processing_success and v.vehicle_id.make})
+
+        # Build summary parts
+        parts = []
         if failed_count == 0:
-            summary_text = f"✓ {successful_count} successful, {total_count} total"
-            text_color = "#2E8B57"  # Success green
+            parts.append(f"✓ {successful_count} vehicles")
+            text_color = "#2E8B57"
         elif successful_count == 0:
-            summary_text = f"✗ {failed_count} failed, {total_count} total"
-            text_color = "#DC143C"  # Error red
+            parts.append(f"✗ {failed_count} failed")
+            text_color = "#DC143C"
         else:
-            summary_text = f"⚠ {successful_count} successful, {failed_count} failed, {total_count} total"
-            text_color = "#FF8C00"  # Warning orange
-        
-        self.summary_label.config(text=summary_text, foreground=text_color)
+            parts.append(f"✓ {successful_count} successful · ✗ {failed_count} failed")
+            text_color = "#FF8C00"
+
+        if unique_makes > 0:
+            parts.append(f"{unique_makes} make{'s' if unique_makes != 1 else ''}")
+        if avg_mpg > 0:
+            parts.append(f"Avg MPG: {avg_mpg:.1f}")
+
+        self.summary_label.config(text="  ·  ".join(parts), foreground=text_color)
+
+        # Right-side count badge
+        mpg_count = len(mpg_values)
+        if mpg_count > 0 and mpg_count < successful_count:
+            self.count_label.config(text=f"MPG data for {mpg_count}/{successful_count} vehicles")
+        else:
+            self.count_label.config(text=f"{total_count} total")
     
     def get_data(self):
         """
@@ -1032,131 +1138,53 @@ Summary of Selected Vehicles ({len(selected_vehicles)})
         # Configure new columns
         self.tree.config(columns=self.visible_columns)
         
-        # Create new headers
+        # Create new headers with content-aware widths
         for col in self.visible_columns:
             display_name = self.all_columns_map.get(col, col)
             self.tree.heading(col, text=display_name, command=lambda c=col: self._sort_by_column(c))
-            
-            # Set a reasonable column width
-            width = max(100, len(display_name) * 10)
-            self.tree.column(col, width=width, minwidth=50)
+
+            width, anchor = self._get_column_width_and_anchor(col, display_name)
+            self.tree.column(col, width=width, minwidth=50, anchor=anchor)
         
         # Repopulate data
         self.populate_data()
     
     def populate_data(self):
-        """
-        Populate the treeview with data from self.data.
-        Enhanced to handle both successful and failed vehicles properly.
-        """
-        logger.info(f"🔧 DEBUG: populate_data() called with {len(self.data)} items")
-        logger.info(f"🔧 DEBUG: populate_data called from thread: {threading.current_thread().name}")
-        
-        try:
-            # Clear existing data
-            logger.info(f"🔧 DEBUG: Clearing existing treeview items")
-            for item in self.tree.get_children():
-                self.tree.delete(item)
-            
-            self.data_map = {}
-            logger.info(f"🔧 DEBUG: Treeview cleared, data_map reset")
-            
-            if not self.data:
-                logger.info(f"🔧 DEBUG: No data to populate, returning early")
-                return
-            
-            # Build column mapping (but don't update columns - that creates recursion)
-            logger.info(f"🔧 DEBUG: Building column mapping")
-            self._build_column_map()
-            logger.info(f"🔧 DEBUG: Column mapping built")
-            
-            # Count different types of vehicles for logging
-            successful_count = 0
-            failed_count = 0
-            missing_vin_count = 0
-            empty_row_count = 0
-            invalid_vin_count = 0
-            
-            logger.info(f"🔧 DEBUG: Starting to add vehicles to treeview")
-            
-            # Add data to treeview
-            for i, vehicle in enumerate(self.data):
-                try:
-                    logger.info(f"🔧 DEBUG: Processing vehicle {i+1}/{len(self.data)}: VIN={getattr(vehicle, 'vin', 'Unknown')}")
-                    
-                    # Create row data
-                    row_data = []
-                    
-                    for col_id in self.visible_columns:
-                        if col_id in self.all_columns_map:
-                            # Get value from vehicle using the proper method
-                            value = self._get_vehicle_value(vehicle, col_id)
-                            
-                            # Special formatting for failed vehicles
-                            if not vehicle.processing_success and col_id == "processing_error":
-                                # Make error message more prominent
-                                value = f"❌ {value}" if value else "❌ Unknown Error"
-                            elif not vehicle.processing_success and col_id == "vin":
-                                # Add error indicator to VIN column for failed vehicles
-                                value = f"⚠️ {value}" if value else "⚠️ No VIN"
-                            
-                            row_data.append(str(value) if value is not None else "")
-                        else:
-                            row_data.append("")
-                    
-                    logger.info(f"🔧 DEBUG: Row data prepared for vehicle {i+1}, inserting into treeview")
-                    
-                    # Insert row
-                    iid = self.tree.insert("", tk.END, values=row_data)
-                    self.data_map[iid] = vehicle
-                    
-                    logger.info(f"🔧 DEBUG: Vehicle {i+1} inserted with iid={iid}, applying color coding")
-                    
-                    # Apply color coding for different types of vehicles
-                    self._apply_row_color_coding(iid, vehicle)
-                    
-                    # Count vehicle types for debugging
-                    if vehicle.processing_success:
-                        successful_count += 1
+        """Populate the treeview with data from self.data."""
+        # Clear existing data
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        self.data_map = {}
+
+        if not self.data:
+            return
+
+        self._build_column_map()
+
+        # Add data to treeview
+        for vehicle in self.data:
+            try:
+                row_data = []
+                for col_id in self.visible_columns:
+                    if col_id in self.all_columns_map:
+                        value = self._get_vehicle_value(vehicle, col_id)
+
+                        # Special formatting for failed vehicles
+                        if not vehicle.processing_success and col_id == "processing_error":
+                            value = f"❌ {value}" if value else "❌ Unknown Error"
+                        elif not vehicle.processing_success and col_id == "vin":
+                            value = f"⚠️ {value}" if value else "⚠️ No VIN"
+
+                        row_data.append(str(value) if value is not None else "")
                     else:
-                        failed_count += 1
-                        if "Missing VIN" in vehicle.processing_error:
-                            missing_vin_count += 1
-                        elif "Empty" in vehicle.processing_error:
-                            empty_row_count += 1
-                        elif "Invalid VIN" in vehicle.processing_error:
-                            invalid_vin_count += 1
-                    
-                    logger.info(f"🔧 DEBUG: Vehicle {i+1} processed successfully")
-                    
-                except Exception as ve:
-                    logger.error(f"🔧 DEBUG: Error adding vehicle {i+1} to tree: {ve}")
-                    logger.error(f"🔧 DEBUG: Vehicle VIN: {getattr(vehicle, 'vin', 'Unknown')}")
-                    logger.error(f"🔧 DEBUG: Vehicle success: {getattr(vehicle, 'processing_success', 'Unknown')}")
-                    import traceback
-                    logger.error(f"🔧 DEBUG: Vehicle error traceback: {traceback.format_exc()}")
-            
-            # Log summary
-            logger.info(f"🔧 DEBUG: populate_data() vehicle processing complete:")
-            logger.info(f"   Successful vehicles: {successful_count}")
-            logger.info(f"   Failed vehicles: {failed_count}")
-            logger.info(f"     - Missing VIN: {missing_vin_count}")
-            logger.info(f"     - Empty rows: {empty_row_count}")
-            logger.info(f"     - Invalid VIN: {invalid_vin_count}")
-            
-            # Apply current filter if any
-            logger.info(f"🔧 DEBUG: Applying filters")
-            self._apply_filter()
-            logger.info(f"🔧 DEBUG: Filters applied successfully")
-            
-            logger.info(f"🔧 DEBUG: populate_data() completed successfully")
-            
-        except Exception as e:
-            logger.error(f"🔧 DEBUG: Exception in populate_data(): {e}")
-            logger.error(f"🔧 DEBUG: populate_data exception type: {type(e).__name__}")
-            import traceback
-            logger.error(f"🔧 DEBUG: populate_data traceback: {traceback.format_exc()}")
-            raise  # Re-raise to see the full error chain
+                        row_data.append("")
+
+                iid = self.tree.insert("", tk.END, values=row_data)
+                self.data_map[iid] = vehicle
+                self._apply_row_color_coding(iid, vehicle)
+
+            except Exception as ve:
+                logger.error(f"Error adding vehicle to results table: {ve}")
     
     def refresh(self):
         """Refresh the display."""
@@ -1195,90 +1223,6 @@ Summary of Selected Vehicles ({len(selected_vehicles)})
         """Handle resize events."""
         # Adjust column widths if needed
         pass
-
-    def _export_for_excel(self):
-        """Export data optimized for Excel analysis with preserved order and quality indicators."""
-        import os
-        import csv
-        import datetime
-        
-        # Get currently displayed data in display order (preserves filtering and sorting)
-        displayed_vehicles = []
-        for iid in self.tree.get_children():
-            if iid in self.data_map:
-                displayed_vehicles.append(self.data_map[iid])
-        
-        if not displayed_vehicles:
-            messagebox.showwarning("No Data", "No data to export.")
-            return
-        
-        # Auto-generate filename with timestamp
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"fleet_analysis_{timestamp}.csv"
-        
-        # Ask user for save location with suggested filename
-        from tkinter import filedialog
-        filepath = filedialog.asksaveasfilename(
-            title="Export Fleet Analysis for Excel",
-            initialname=filename,
-            defaultextension=".csv",
-            filetypes=[
-                ("CSV Files (Excel Compatible)", "*.csv"),
-                ("All Files", "*.*")
-            ]
-        )
-        
-        if not filepath:
-            return
-        
-        try:
-            # Define Excel-optimized column order with data quality indicators
-            excel_columns = [
-                "VIN", "Processing Status", "Data Quality", "Year", "Make", "Model", 
-                "FuelTypePrimary", "BodyClass", "GVWR",
-                "MPG Combined", "MPG City", "MPG Highway", 
-                "CO2 emissions", "Asset ID", "Department", "Location",
-                "Odometer", "Annual Mileage", "Processing Error"
-            ]
-            
-            # Add any additional custom fields that exist
-            sample_row = displayed_vehicles[0].to_row_dict()
-            for key in sample_row.keys():
-                if key not in excel_columns and key not in ["co2A", "rangeA", "Assumed Vehicle (Text)", "Assumed Vehicle (ID)"]:
-                    excel_columns.append(key)
-            
-            # Write to CSV with Excel-friendly formatting
-            with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:  # UTF-8 BOM for Excel
-                writer = csv.writer(f)
-                
-                # Write header row
-                writer.writerow(excel_columns)
-                
-                # Write data rows in preserved order
-                for vehicle in displayed_vehicles:
-                    row_dict = vehicle.to_row_dict()
-                    row = [row_dict.get(col, "") for col in excel_columns]
-                    writer.writerow(row)
-            
-            # Show success message with helpful info
-            success_msg = f"✅ Fleet analysis exported successfully!\n\n"
-            success_msg += f"📁 File: {os.path.basename(filepath)}\n"
-            success_msg += f"📊 Vehicles: {len(displayed_vehicles)}\n"
-            success_msg += f"📋 Columns: {len(excel_columns)}\n\n"
-            success_msg += "💡 Tips for Excel analysis:\n"
-            success_msg += "• Data Quality column shows confidence (0-100%)\n"
-            success_msg += "• Processing Status shows Success/Failed\n"
-            success_msg += "• Sort by Data Quality to prioritize reliable data\n"
-            success_msg += "• Filter by Processing Status to focus on successful matches"
-            
-            messagebox.showinfo("Export Complete", success_msg)
-            
-        except Exception as e:
-            logger.error(f"Error exporting for Excel: {e}")
-            messagebox.showerror(
-                "Export Failed",
-                f"Failed to export data:\n{str(e)}"
-            )
 
     def _get_vehicle_value(self, vehicle: FleetVehicle, col_id: str) -> Any:
         """

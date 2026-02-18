@@ -14,9 +14,6 @@ import threading
 from typing import Dict, Any, List, Optional, Callable, Union, Tuple
 from pathlib import Path
 
-import tkinter as tk
-from tkinter import ttk
-
 from settings import LOG_FORMAT, LOG_LEVEL, LOG_DATE_FORMAT, DEFAULT_LOG_FILE, CACHE_EXPIRY
 
 ###############################################################################
@@ -362,425 +359,202 @@ class SafeDict:
 
 class Cache:
     """
-    Thread-safe caching system with expiration.
+    Thread-safe caching system with expiration and optional disk persistence.
+
+    When a `file_path` is provided, the cache loads from disk on init and
+    can be saved back with `save_to_disk()`.  Values are stored as JSON —
+    dataclass objects that implement `to_dict()` are serialized with a
+    `_cache_type` tag so they can be reconstructed on load.
     """
-    
-    def __init__(self, expiry_seconds: int = CACHE_EXPIRY):
+
+    # Registry of types that can be round-tripped through JSON
+    _TYPE_REGISTRY: Dict[str, Any] = {}
+
+    @classmethod
+    def register_type(cls, type_class: Any) -> None:
+        """Register a dataclass type for cache serialization."""
+        cls._TYPE_REGISTRY[type_class.__name__] = type_class
+
+    def __init__(self, expiry_seconds: int = CACHE_EXPIRY,
+                 file_path: Optional[Union[str, Path]] = None):
         self._cache = SafeDict()
         self._expiry = expiry_seconds
-    
+        self._file_path = Path(file_path) if file_path else None
+        self._dirty = False  # Track whether in-memory state differs from disk
+
+        # Load from disk if a file was provided
+        if self._file_path:
+            self._load_from_disk()
+
+    # ── public API (unchanged interface) ──────────────────────────
+
     def get(self, key: str) -> Optional[Any]:
-        """
-        Get a value from the cache if it exists and is not expired.
-        
-        Args:
-            key: Cache key
-            
-        Returns:
-            Cached value or None if not found or expired
-        """
+        """Get a value from the cache if it exists and is not expired."""
         entry = self._cache.get(key)
         if entry is None:
             return None
-        
+
         timestamp, value = entry
         if time.time() - timestamp > self._expiry:
-            # Expired
             self._cache.delete(key)
+            self._dirty = True
             return None
-        
+
         return value
-    
+
     def set(self, key: str, value: Any) -> None:
-        """
-        Store a value in the cache with current timestamp.
-        
-        Args:
-            key: Cache key
-            value: Value to store
-        """
+        """Store a value in the cache with current timestamp."""
         self._cache.set(key, (time.time(), value))
-    
+        self._dirty = True
+
     def delete(self, key: str) -> None:
-        """
-        Remove a value from the cache.
-        
-        Args:
-            key: Cache key to remove
-        """
+        """Remove a value from the cache."""
         self._cache.delete(key)
-    
+        self._dirty = True
+
     def clear(self) -> None:
         """Clear all entries from the cache."""
         self._cache.clear()
-    
+        self._dirty = True
+
     def size(self) -> int:
         """Get the number of entries in the cache."""
         return self._cache.size()
-    
+
     def prune(self) -> int:
-        """
-        Remove all expired entries from the cache.
-        
-        Returns:
-            Number of entries removed
-        """
+        """Remove all expired entries. Returns count removed."""
         keys_to_delete = []
         now = time.time()
-        
+
         for key, entry in self._cache.items():
             timestamp, _ = entry
             if now - timestamp > self._expiry:
                 keys_to_delete.append(key)
-        
+
         for key in keys_to_delete:
             self._cache.delete(key)
-        
+
+        if keys_to_delete:
+            self._dirty = True
         return len(keys_to_delete)
 
-###############################################################################
-# UI Widgets and Helpers
-###############################################################################
+    # ── disk persistence ──────────────────────────────────────────
 
-class SimpleTooltip:
-    """
-    Creates a tooltip for a Tkinter widget.
-    
-    Example:
-        button = tk.Button(root, text="Help")
-        SimpleTooltip(button, "Click for help")
-    """
-    
-    def __init__(self, widget, text, delay=500, fg="#000000", bg="#FFFFEA", 
-                 padx=5, pady=3, font=None):
+    def save_to_disk(self) -> bool:
         """
-        Initialize tooltip with widget and text.
-        
-        Args:
-            widget: The widget to attach the tooltip to
-            text: Tooltip text
-            delay: Delay in ms before showing tooltip
-            fg: Text color
-            bg: Background color
-            padx: Horizontal padding
-            pady: Vertical padding
-            font: Font to use (None for default)
+        Persist the current cache to the JSON file specified at init.
+        Returns True on success, False on failure or if no file was configured.
         """
-        self.widget = widget
-        self.text = text
-        self.delay = delay
-        self.fg = fg
-        self.bg = bg
-        self.padx = padx
-        self.pady = pady
-        self.font = font or ("tahoma", "8", "normal")
-        
-        self.tipwindow = None
-        self.after_id = None
-        
-        self.widget.bind("<Enter>", self.schedule_show)
-        self.widget.bind("<Leave>", self.hide)
-        self.widget.bind("<ButtonPress>", self.hide)
-    
-    def schedule_show(self, event=None):
-        """Schedule the tooltip to appear after the delay."""
-        self.cancel_scheduled()
-        self.after_id = self.widget.after(self.delay, self.show)
-    
-    def cancel_scheduled(self):
-        """Cancel any scheduled tooltip showing."""
-        if self.after_id:
-            self.widget.after_cancel(self.after_id)
-            self.after_id = None
-    
-    def show(self):
-        """Create and display the tooltip."""
-        if self.tipwindow or not self.text:
+        if not self._file_path:
+            return False
+        if not self._dirty:
+            return True  # Nothing changed — skip the write
+
+        try:
+            # Prune expired entries before saving
+            self.prune()
+
+            serializable = {}
+            for key, entry in self._cache.items():
+                timestamp, value = entry
+                serializable[key] = {
+                    "t": timestamp,
+                    "v": self._serialize_value(value)
+                }
+
+            # Ensure parent directory exists
+            self._file_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Atomic-ish write: write to temp file then rename
+            tmp_path = self._file_path.with_suffix(".tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(serializable, f, separators=(",", ":"))
+            tmp_path.replace(self._file_path)
+
+            self._dirty = False
+            logger.info(f"Cache saved: {self.size()} entries to {self._file_path.name}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to save cache to {self._file_path}: {e}")
+            return False
+
+    def _load_from_disk(self) -> None:
+        """Load cache entries from the JSON file."""
+        if not self._file_path or not self._file_path.exists():
             return
-        
-        # Position tooltip below and slightly to the right of the widget
-        x = self.widget.winfo_rootx() + 20
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 10
-        
-        # Create tooltip window
-        self.tipwindow = tw = tk.Toplevel(self.widget)
-        tw.wm_overrideredirect(True)  # Remove window decorations
-        tw.wm_geometry(f"+{x}+{y}")
-        
-        # Create tooltip content
-        label = tk.Label(
-            tw, text=self.text, justify=tk.LEFT,
-            background=self.bg, foreground=self.fg,
-            relief="solid", borderwidth=1,
-            font=self.font
-        )
-        label.pack(ipadx=self.padx, ipady=self.pady)
-    
-    def hide(self, event=None):
-        """Destroy the tooltip window."""
-        self.cancel_scheduled()
-        if self.tipwindow:
-            self.tipwindow.destroy()
-            self.tipwindow = None
 
-class StatusBar(ttk.Frame):
-    """
-    Status bar widget with multiple sections.
-    
-    Example:
-        status_bar = StatusBar(root)
-        status_bar.pack(side="bottom", fill="x")
-        status_bar.set("Ready")
-        status_bar.set("Processing...", section="process")
-    """
-    
-    def __init__(self, master, **kwargs):
-        """
-        Initialize the status bar.
-        
-        Args:
-            master: Parent widget
-            **kwargs: Additional keyword arguments for ttk.Frame
-        """
-        super().__init__(master, **kwargs)
-        
-        self.sections = {}
-        
-        # Main status section (left-aligned)
-        self.sections["main"] = ttk.Label(
-            self, relief="sunken", anchor="w", padding=(5, 2)
-        )
-        self.sections["main"].pack(side="left", fill="x", expand=True)
-        
-        # Set default message
-        self.set("Ready")
-    
-    def add_section(self, name, width=None, side="right"):
-        """
-        Add a new section to the status bar.
-        
-        Args:
-            name: Section identifier
-            width: Width in characters (None for auto)
-            side: Side to place section ("left" or "right")
-        """
-        if name in self.sections:
-            return
-        
-        self.sections[name] = ttk.Label(
-            self, relief="sunken", anchor="w", padding=(5, 2), width=width
-        )
-        self.sections[name].pack(side=side, fill="y", padx=(1, 0))
-        
-        # Set default text
-        self.set("", section=name)
-    
-    def set(self, text, section="main"):
-        """
-        Set the text for a section.
-        
-        Args:
-            text: Text to display
-            section: Section identifier
-        """
-        if section in self.sections:
-            self.sections[section].config(text=text)
+        try:
+            with open(self._file_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
 
-class ProgressDialog(tk.Toplevel):
-    """
-    Modal dialog with a progress bar and cancel button.
-    
-    Example:
-        progress = ProgressDialog(root, "Processing Files", "Please wait...")
-        for i in range(100):
-            if progress.cancelled:
-                break
-            progress.update(i)
-            # Do work...
-        progress.destroy()
-    """
-    
-    def __init__(self, parent, title, message, maximum=100, cancelable=True):
-        """
-        Initialize the progress dialog.
-        
-        Args:
-            parent: Parent window
-            title: Dialog title
-            message: Message to display
-            maximum: Maximum progress value
-            cancelable: Whether the operation can be cancelled
-        """
-        super().__init__(parent)
-        self.title(title)
-        self.resizable(False, False)
-        self.transient(parent)
-        self.grab_set()
-        
-        self.cancelled = False
-        self.maximum = maximum
-        
-        # Calculate position (center on parent)
-        width = 350
-        height = 150
-        parent_x = parent.winfo_rootx()
-        parent_y = parent.winfo_rooty()
-        parent_width = parent.winfo_width()
-        parent_height = parent.winfo_height()
-        x = parent_x + (parent_width // 2) - (width // 2)
-        y = parent_y + (parent_height // 2) - (height // 2)
-        
-        self.geometry(f"{width}x{height}+{x}+{y}")
-        
-        # Message label
-        self.message_var = tk.StringVar(value=message)
-        self.message_label = ttk.Label(
-            self, textvariable=self.message_var, wraplength=width-20
-        )
-        self.message_label.pack(padx=10, pady=(10, 5))
-        
-        # Progress bar
-        self.progress_var = tk.DoubleVar(value=0)
-        self.progressbar = ttk.Progressbar(
-            self, orient=tk.HORIZONTAL, length=300,
-            mode='determinate', variable=self.progress_var,
-            maximum=maximum
-        )
-        self.progressbar.pack(padx=10, pady=5)
-        
-        # Status label
-        self.status_var = tk.StringVar(value="Starting...")
-        self.status_label = ttk.Label(
-            self, textvariable=self.status_var
-        )
-        self.status_label.pack(padx=10, pady=5)
-        
-        # Cancel button (if cancelable)
-        if cancelable:
-            self.cancel_button = ttk.Button(
-                self, text="Cancel", command=self.cancel
-            )
-            self.cancel_button.pack(pady=10)
-        
-        # Update the UI
-        self.update_idletasks()
-    
-    def update(self, value, message=None, status=None):
-        """
-        Update the progress and optionally the message.
-        
-        Args:
-            value: Current progress value
-            message: New message (or None to keep current)
-            status: Status text (or None to keep current)
-        """
-        self.progress_var.set(value)
-        if message is not None:
-            self.message_var.set(message)
-        
-        if status is not None:
-            percent = int((value / self.maximum) * 100)
-            self.status_var.set(f"{status} ({percent}%)")
-        else:
-            percent = int((value / self.maximum) * 100)
-            self.status_var.set(f"{percent}%")
-        
-        self.update_idletasks()
-    
-    def cancel(self):
-        """Mark as cancelled and update UI."""
-        self.cancelled = True
-        self.status_var.set("Cancelling...")
-        if hasattr(self, 'cancel_button'):
-            self.cancel_button.config(state="disabled")
+            now = time.time()
+            loaded = 0
+            expired = 0
 
-class ScrollableFrame(ttk.Frame):
-    """
-    A frame with scrollbars that can contain other widgets.
-    
-    Example:
-        scrollable = ScrollableFrame(root)
-        scrollable.pack(fill="both", expand=True)
-        
-        # Add widgets to the scrollable area
-        for i in range(50):
-            ttk.Label(scrollable.scrollable_frame, text=f"Row {i}").pack()
-    """
-    
-    def __init__(self, master, **kwargs):
-        """
-        Initialize the scrollable frame.
-        
-        Args:
-            master: Parent widget
-            **kwargs: Additional keyword arguments for ttk.Frame
-        """
-        super().__init__(master, **kwargs)
-        
-        # Create a canvas widget
-        self.canvas = tk.Canvas(self)
-        
-        # Create vertical scrollbar
-        self.vsb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=self.vsb.set)
-        
-        # Create horizontal scrollbar
-        self.hsb = ttk.Scrollbar(self, orient="horizontal", command=self.canvas.xview)
-        self.canvas.configure(xscrollcommand=self.hsb.set)
-        
-        # Layout scrollbars and canvas
-        self.vsb.pack(side="right", fill="y")
-        self.hsb.pack(side="bottom", fill="x")
-        self.canvas.pack(side="left", fill="both", expand=True)
-        
-        # Create the scrollable frame inside the canvas
-        self.scrollable_frame = ttk.Frame(self.canvas)
-        
-        # Bind frame size changes to update canvas scrollregion
-        self.scrollable_frame.bind(
-            "<Configure>",
-            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        )
-        
-        # Create window in canvas to contain the frame
-        self.canvas_window = self.canvas.create_window(
-            (0, 0), window=self.scrollable_frame, anchor="nw"
-        )
-        
-        # Adjust window size when canvas size changes
-        self.canvas.bind("<Configure>", self._configure_canvas_window)
-        
-        # Bind mouse wheel to scroll
-        self.scrollable_frame.bind("<Enter>", self._bind_mousewheel)
-        self.scrollable_frame.bind("<Leave>", self._unbind_mousewheel)
-    
-    def _configure_canvas_window(self, event):
-        """Adjust the width of the canvas window when canvas size changes."""
-        self.canvas.itemconfig(
-            self.canvas_window, width=event.width
-        )
-    
-    def _bind_mousewheel(self, event):
-        """Bind mouse wheel to scroll vertically."""
-        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-        # Linux support
-        self.canvas.bind_all("<Button-4>", self._on_mousewheel)
-        self.canvas.bind_all("<Button-5>", self._on_mousewheel)
-    
-    def _unbind_mousewheel(self, event):
-        """Unbind mouse wheel when mouse leaves widget."""
-        self.canvas.unbind_all("<MouseWheel>")
-        self.canvas.unbind_all("<Button-4>")
-        self.canvas.unbind_all("<Button-5>")
-    
-    def _on_mousewheel(self, event):
-        """Handle mouse wheel events."""
-        if event.num == 4 or event.delta > 0:
-            # Scroll up
-            self.canvas.yview_scroll(-1, "units")
-        elif event.num == 5 or event.delta < 0:
-            # Scroll down
-            self.canvas.yview_scroll(1, "units")
+            for key, entry in raw.items():
+                timestamp = entry.get("t", 0)
+                if now - timestamp > self._expiry:
+                    expired += 1
+                    continue  # Skip expired entries on load
+                value = self._deserialize_value(entry.get("v"))
+                self._cache.set(key, (timestamp, value))
+                loaded += 1
+
+            logger.info(f"Cache loaded: {loaded} entries from {self._file_path.name}"
+                        f"{f' ({expired} expired, skipped)' if expired else ''}")
+
+        except (json.JSONDecodeError, IOError, KeyError) as e:
+            logger.warning(f"Could not load cache from {self._file_path}: {e}")
+
+    # ── serialization helpers ─────────────────────────────────────
+
+    @classmethod
+    def _serialize_value(cls, value: Any) -> Any:
+        """Convert a value to a JSON-safe representation."""
+        if value is None:
+            return None
+        # Dataclass objects with to_dict()
+        if hasattr(value, "to_dict") and hasattr(value, "__dataclass_fields__"):
+            return {"_cache_type": type(value).__name__, "data": value.to_dict()}
+        # Lists — recurse
+        if isinstance(value, list):
+            return [cls._serialize_value(item) for item in value]
+        # Dicts — recurse on values
+        if isinstance(value, dict):
+            return {k: cls._serialize_value(v) for k, v in value.items()}
+        # Primitives (str, int, float, bool) are already JSON-safe
+        return value
+
+    @classmethod
+    def _deserialize_value(cls, raw: Any) -> Any:
+        """Reconstruct a value from its JSON representation."""
+        if raw is None:
+            return None
+        if isinstance(raw, dict):
+            type_name = raw.get("_cache_type")
+            if type_name and type_name in cls._TYPE_REGISTRY:
+                type_class = cls._TYPE_REGISTRY[type_name]
+                return type_class.from_dict(raw["data"])
+            # Regular dict — recurse
+            return {k: cls._deserialize_value(v) for k, v in raw.items()}
+        if isinstance(raw, list):
+            return [cls._deserialize_value(item) for item in raw]
+        return raw
+
+###############################################################################
+# UI Widgets and Helpers — canonical location is now ui/widgets.py
+# Re-exported here for backward compatibility with existing imports.
+###############################################################################
+
+from ui.widgets import (  # noqa: F401, E402
+    SimpleTooltip,
+    StatusBar,
+    ProgressDialog,
+    ScrollableFrame,
+    ErrorCommunicator,
+    ContextHelp,
+)
 
 ###############################################################################
 # Data Validation
@@ -859,655 +633,3 @@ def validate_year(year: str) -> bool:
         return 1900 <= year_int <= current_year + 1
     except ValueError:
         return False
-
-###############################################################################
-# Commercial Vehicle Detection - Step 12 Enhancement
-###############################################################################
-
-def extract_gvwr_pounds(gvwr_text: str) -> Tuple[float, str]:
-    """
-    Extract numeric GVWR value from various text formats.
-    
-    Args:
-        gvwr_text: Raw GVWR text from NHTSA API
-        
-    Returns:
-        Tuple of (gvwr_pounds, commercial_category)
-        
-    Examples:
-        "Class 1: 6,000 lb (2,722 kg)" -> (6000.0, "Light Duty")
-        "8500" -> (8500.0, "Light Duty")
-        "19,500 lb" -> (19500.0, "Medium Duty")
-    """
-    import re
-    
-    if not gvwr_text:
-        return 0.0, ""
-    
-    # Patterns to extract GVWR in pounds
-    patterns = [
-        r'(\d{1,2},?\d{3})\s*(?:lb|lbs|pounds?)',  # "6,000 lb" or "6000 lb"
-        r'(\d{1,2},?\d{3})\s*(?:\(|$)',  # "6,000 (" or "6000" at end
-        r':\s*(\d{1,2},?\d{3})',  # ": 6,000"
-        r'(\d{4,6})'  # Raw numbers like "6000"
-    ]
-    
-    gvwr_pounds = 0.0
-    for pattern in patterns:
-        match = re.search(pattern, gvwr_text.replace(',', ''))
-        if match:
-            try:
-                gvwr_pounds = float(match.group(1).replace(',', ''))
-                break
-            except ValueError:
-                continue
-    
-    # Classify commercial category based on GVWR
-    if gvwr_pounds > 0:
-        if gvwr_pounds <= 8500:
-            commercial_category = "Light Duty"
-        elif gvwr_pounds <= 19500:
-            commercial_category = "Medium Duty" 
-        elif gvwr_pounds <= 33000:
-            commercial_category = "Heavy Duty"
-        else:
-            commercial_category = "Extra Heavy Duty"
-    else:
-        commercial_category = ""
-    
-    return gvwr_pounds, commercial_category
-
-def detect_commercial_vehicle(make: str, model: str, body_class: str, 
-                            gvwr_pounds: float = 0.0) -> bool:
-    """
-    Determine if a vehicle is likely a commercial vehicle.
-    
-    Args:
-        make: Vehicle manufacturer
-        model: Vehicle model
-        body_class: Vehicle body class
-        gvwr_pounds: Gross vehicle weight rating in pounds
-        
-    Returns:
-        True if vehicle appears to be commercial
-    """
-    # Commercial indicators by body class
-    commercial_body_classes = [
-        "truck", "van", "bus", "chassis cab", "cutaway", "pickup",
-        "cargo van", "passenger van", "step van", "box truck",
-        "utility", "commercial", "work truck", "crew cab"
-    ]
-    
-    # Commercial vehicle models (common fleet vehicles)
-    commercial_models = [
-        # Ford commercial lineup
-        "transit", "e-series", "f-150", "f-250", "f-350", "f-450", "f-550",
-        "f150", "f250", "f350", "f450", "f550", "econoline",
-        
-        # GM commercial lineup  
-        "express", "savana", "silverado", "sierra", 
-        
-        # Chrysler/RAM commercial lineup
-        "promaster", "ram 1500", "ram 2500", "ram 3500", "ram1500", "ram2500", "ram3500",
-        
-        # Other commercial vehicles
-        "sprinter", "metris", "nv200", "nv1500", "nv2500", "nv3500",
-        "city express", "connect"
-    ]
-    
-    # Check body class
-    body_lower = body_class.lower()
-    for indicator in commercial_body_classes:
-        if indicator in body_lower:
-            return True
-    
-    # Check model name
-    model_lower = model.lower()
-    for indicator in commercial_models:
-        if indicator in model_lower:
-            return True
-    
-    # Check GVWR (vehicles over 8,500 lbs are typically commercial)
-    if gvwr_pounds > 8500:
-        return True
-    
-    # Check make-specific patterns
-    make_lower = make.lower()
-    if make_lower in ["isuzu", "mack", "peterbilt", "kenworth", "freightliner", "volvo trucks"]:
-        return True  # These are primarily commercial vehicle manufacturers
-    
-    return False
-
-def detect_diesel_engine(fuel_type_primary: str = "", fuel_type_secondary: str = "", 
-                        engine_type: str = "", model: str = "") -> bool:
-    """
-    Detect if a vehicle uses diesel fuel.
-    
-    Args:
-        fuel_type_primary: Primary fuel type from NHTSA
-        fuel_type_secondary: Secondary fuel type from NHTSA
-        engine_type: Engine type/configuration from NHTSA
-        model: Vehicle model name
-        
-    Returns:
-        True if vehicle appears to use diesel
-    """
-    diesel_indicators = [
-        "diesel", "biodiesel", "b20", "b100", 
-        "compression ignition", "ci", "cng/diesel",
-        "diesel electric", "hybrid diesel"
-    ]
-    
-    # Check all fuel and engine fields
-    fields_to_check = [
-        fuel_type_primary.lower(),
-        fuel_type_secondary.lower(), 
-        engine_type.lower()
-    ]
-    
-    for field in fields_to_check:
-        for indicator in diesel_indicators:
-            if indicator in field:
-                return True
-    
-    # Check model name for diesel indicators
-    model_lower = model.lower()
-    diesel_model_indicators = [
-        "duramax", "powerstroke", "cummins", "ecodiesel", "bluetec"
-    ]
-    
-    for indicator in diesel_model_indicators:
-        if indicator in model_lower:
-            return True
-    
-    return False
-
-def classify_commercial_category(gvwr_pounds: float, body_class: str = "") -> str:
-    """
-    Classify commercial category based on GVWR and body class.
-    
-    Args:
-        gvwr_pounds: Gross vehicle weight rating in pounds
-        body_class: Vehicle body class (optional)
-        
-    Returns:
-        Commercial category string
-    """
-    # GVWR-based classification (US DOT standards)
-    if gvwr_pounds <= 0:
-        return ""
-    elif gvwr_pounds <= 8500:
-        return "Light Duty"
-    elif gvwr_pounds <= 19500:
-        return "Medium Duty"
-    elif gvwr_pounds <= 33000:
-        return "Heavy Duty"
-    else:
-        return "Extra Heavy Duty"
-
-def get_commercial_summary(commercial_category: str, is_diesel: bool, 
-                          gvwr_pounds: float, is_commercial: bool) -> str:
-    """
-    Generate a summary string of commercial vehicle characteristics.
-    
-    Args:
-        commercial_category: Light/Medium/Heavy Duty classification
-        is_diesel: Whether vehicle uses diesel
-        gvwr_pounds: Gross vehicle weight in pounds
-        is_commercial: Whether classified as commercial vehicle
-        
-    Returns:
-        Human-readable commercial summary string
-    """
-    if not is_commercial:
-        return "Passenger Vehicle"
-    
-    parts = []
-    
-    if commercial_category:
-        parts.append(commercial_category)
-    
-    if is_diesel:
-        parts.append("Diesel")
-    
-    if gvwr_pounds > 0:
-        parts.append(f"GVWR: {gvwr_pounds:,.0f} lb")
-    
-    return " | ".join(parts) if parts else "Commercial Vehicle"
-
-def extract_engine_power(engine_hp: str, engine_kw: str) -> Tuple[str, str]:
-    """
-    Clean and format engine power values.
-    
-    Args:
-        engine_hp: Horsepower string from NHTSA
-        engine_kw: Kilowatt string from NHTSA
-        
-    Returns:
-        Tuple of (formatted_hp, formatted_kw)
-    """
-    import re
-    
-    # Clean HP value
-    hp_clean = ""
-    if engine_hp:
-        # Extract numeric value from HP string
-        hp_match = re.search(r'(\d+(?:\.\d+)?)', str(engine_hp))
-        if hp_match:
-            hp_clean = f"{hp_match.group(1)} HP"
-    
-    # Clean KW value  
-    kw_clean = ""
-    if engine_kw:
-        # Extract numeric value from KW string
-        kw_match = re.search(r'(\d+(?:\.\d+)?)', str(engine_kw))
-        if kw_match:
-            kw_clean = f"{kw_match.group(1)} kW"
-    
-    return hp_clean, kw_clean
-
-# Enhanced error communication utilities
-class ErrorCommunicator:
-    """Enhanced error communication with user-friendly messages and suggested fixes."""
-    
-    ERROR_CATEGORIES = {
-        "vin_format": {
-            "title": "VIN Format Error",
-            "icon": "❌",
-            "color": "#d32f2f"
-        },
-        "file_access": {
-            "title": "File Access Error", 
-            "icon": "📁",
-            "color": "#f57c00"
-        },
-        "api_error": {
-            "title": "Data Lookup Error",
-            "icon": "🌐", 
-            "color": "#1976d2"
-        },
-        "processing": {
-            "title": "Processing Error",
-            "icon": "⚙️",
-            "color": "#7b1fa2"
-        },
-        "validation": {
-            "title": "Data Validation Error",
-            "icon": "⚠️",
-            "color": "#f57c00"
-        }
-    }
-    
-    @classmethod
-    def show_error_dialog(cls, parent, category: str, message: str, details: str = "", 
-                         suggested_fixes: List[str] = None, context_help: str = ""):
-        """
-        Show an enhanced error dialog with category-specific styling and helpful suggestions.
-        
-        Args:
-            parent: Parent window
-            category: Error category from ERROR_CATEGORIES
-            message: Main error message
-            details: Additional details
-            suggested_fixes: List of suggested solutions
-            context_help: Context-sensitive help information
-        """
-        category_info = cls.ERROR_CATEGORIES.get(category, cls.ERROR_CATEGORIES["processing"])
-        
-        # Create custom dialog
-        dialog = tk.Toplevel(parent)
-        dialog.title(category_info["title"])
-        dialog.resizable(False, False)
-        dialog.transient(parent)
-        dialog.grab_set()
-        
-        # Calculate position (center on parent)
-        width = 500
-        height = 400
-        parent_x = parent.winfo_rootx()
-        parent_y = parent.winfo_rooty()
-        parent_width = parent.winfo_width()
-        parent_height = parent.winfo_height()
-        x = parent_x + (parent_width // 2) - (width // 2)
-        y = parent_y + (parent_height // 2) - (height // 2)
-        dialog.geometry(f"{width}x{height}+{x}+{y}")
-        
-        # Main frame
-        main_frame = ttk.Frame(dialog)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
-        
-        # Header with icon and title
-        header_frame = ttk.Frame(main_frame)
-        header_frame.pack(fill=tk.X, pady=(0, 15))
-        
-        icon_label = tk.Label(
-            header_frame, 
-            text=category_info["icon"], 
-            font=("Segoe UI", 24),
-            fg=category_info["color"]
-        )
-        icon_label.pack(side=tk.LEFT, padx=(0, 10))
-        
-        title_label = tk.Label(
-            header_frame,
-            text=category_info["title"],
-            font=("Segoe UI", 14, "bold"),
-            fg=category_info["color"]
-        )
-        title_label.pack(side=tk.LEFT, anchor=tk.W)
-        
-        # Main message
-        message_label = tk.Label(
-            main_frame,
-            text=message,
-            font=("Segoe UI", 11),
-            wraplength=450,
-            justify=tk.LEFT
-        )
-        message_label.pack(fill=tk.X, pady=(0, 10))
-        
-        # Details section
-        if details:
-            details_frame = ttk.LabelFrame(main_frame, text="Details")
-            details_frame.pack(fill=tk.X, pady=(0, 10))
-            
-            details_text = tk.Text(
-                details_frame, 
-                height=4, 
-                wrap=tk.WORD, 
-                bg="#f5f5f5",
-                font=("Consolas", 9)
-            )
-            details_text.pack(fill=tk.X, padx=10, pady=10)
-            details_text.insert(1.0, details)
-            details_text.config(state=tk.DISABLED)
-        
-        # Suggested fixes
-        if suggested_fixes:
-            fixes_frame = ttk.LabelFrame(main_frame, text="💡 Suggested Solutions")
-            fixes_frame.pack(fill=tk.X, pady=(0, 10))
-            
-            for i, fix in enumerate(suggested_fixes, 1):
-                fix_label = tk.Label(
-                    fixes_frame,
-                    text=f"{i}. {fix}",
-                    font=("Segoe UI", 10),
-                    wraplength=450,
-                    justify=tk.LEFT,
-                    anchor=tk.W
-                )
-                fix_label.pack(fill=tk.X, padx=10, pady=2)
-        
-        # Context help
-        if context_help:
-            help_frame = ttk.LabelFrame(main_frame, text="ℹ️ Additional Help")
-            help_frame.pack(fill=tk.X, pady=(0, 15))
-            
-            help_label = tk.Label(
-                help_frame,
-                text=context_help,
-                font=("Segoe UI", 9),
-                wraplength=450,
-                justify=tk.LEFT,
-                fg="#666666"
-            )
-            help_label.pack(fill=tk.X, padx=10, pady=10)
-        
-        # Buttons
-        button_frame = ttk.Frame(main_frame)
-        button_frame.pack(fill=tk.X)
-        
-        ttk.Button(
-            button_frame,
-            text="OK",
-            command=dialog.destroy
-        ).pack(side=tk.RIGHT, padx=(10, 0))
-        
-        if context_help:
-            ttk.Button(
-                button_frame,
-                text="Copy Details",
-                command=lambda: cls._copy_error_details(category, message, details)
-            ).pack(side=tk.RIGHT)
-    
-    @classmethod
-    def _copy_error_details(cls, category: str, message: str, details: str):
-        """Copy error details to clipboard for support."""
-        import datetime
-        
-        error_report = f"""Fleet Electrification Analyzer - Error Report
-Generated: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-
-Category: {category}
-Message: {message}
-
-Details:
-{details}
-
-Please include this information when reporting issues.
-"""
-        
-        # Copy to clipboard
-        root = tk._default_root
-        if root:
-            root.clipboard_clear()
-            root.clipboard_append(error_report)
-    
-    @classmethod
-    def get_vin_error_message(cls, vin: str, error_type: str) -> Tuple[str, List[str]]:
-        """
-        Get user-friendly VIN error message with suggested fixes.
-        
-        Args:
-            vin: The problematic VIN
-            error_type: Type of VIN error
-            
-        Returns:
-            Tuple of (message, suggested_fixes)
-        """
-        if error_type == "length":
-            message = f"The VIN '{vin}' has {len(vin)} characters, but VINs must be exactly 17 characters long."
-            fixes = [
-                "Check for missing characters at the beginning or end",
-                "Remove any spaces or special characters",
-                "Verify the VIN from the vehicle documentation"
-            ]
-        
-        elif error_type == "invalid_chars":
-            message = f"The VIN '{vin}' contains invalid characters. VINs can only contain letters and numbers (except I, O, and Q)."
-            fixes = [
-                "Replace any I, O, Q characters with 1, 0, or other valid characters",
-                "Remove spaces, hyphens, or other special characters", 
-                "Check if characters were misread (e.g., 8 vs B, 5 vs S)"
-            ]
-        
-        elif error_type == "placeholder":
-            message = f"The VIN '{vin}' appears to be a placeholder or template rather than a real VIN."
-            fixes = [
-                "Replace with the actual VIN from the vehicle",
-                "Check vehicle registration or insurance documents",
-                "Look for the VIN on the dashboard or driver's side door frame"
-            ]
-        
-        else:
-            message = f"The VIN '{vin}' is not valid."
-            fixes = [
-                "Verify the VIN is exactly 17 characters",
-                "Check for invalid characters (I, O, Q are not allowed)",
-                "Ensure it's a real VIN, not a placeholder"
-            ]
-        
-        return message, fixes
-    
-    @classmethod
-    def get_file_error_message(cls, filepath: str, error_type: str) -> Tuple[str, List[str]]:
-        """
-        Get user-friendly file error message with suggested fixes.
-        
-        Args:
-            filepath: The problematic file path
-            error_type: Type of file error
-            
-        Returns:
-            Tuple of (message, suggested_fixes)
-        """
-        filename = os.path.basename(filepath)
-        
-        if error_type == "not_found":
-            message = f"The file '{filename}' could not be found."
-            fixes = [
-                "Check if the file was moved or deleted",
-                "Verify the file path is correct",
-                "Use the Browse button to select the file again"
-            ]
-        
-        elif error_type == "permission":
-            message = f"Permission denied when trying to access '{filename}'."
-            fixes = [
-                "Check if the file is open in another program (like Excel)",
-                "Run the application as administrator",
-                "Verify you have read/write permissions for this location"
-            ]
-        
-        elif error_type == "format":
-            message = f"The file '{filename}' is not in the expected CSV format."
-            fixes = [
-                "Save the file as CSV format (.csv extension)",
-                "Check if the file uses the correct delimiter (comma)",
-                "Use the 'Download Sample CSV' button to see the expected format"
-            ]
-        
-        elif error_type == "encoding":
-            message = f"The file '{filename}' has encoding issues and cannot be read properly."
-            fixes = [
-                "Save the file with UTF-8 encoding",
-                "Open in Excel and 'Save As' CSV (UTF-8)",
-                "Remove any special characters that might cause encoding issues"
-            ]
-        
-        else:
-            message = f"An error occurred while processing the file '{filename}'."
-            fixes = [
-                "Check if the file is corrupted",
-                "Try opening the file in Excel to verify it's readable",
-                "Use a different file or recreate the CSV"
-            ]
-        
-        return message, fixes
-
-class ContextHelp:
-    """Context-sensitive help system for user guidance."""
-    
-    HELP_TOPICS = {
-        "vin_format": """
-VIN (Vehicle Identification Number) Format:
-• Must be exactly 17 characters long
-• Contains letters and numbers only
-• Cannot contain I, O, or Q (to avoid confusion with 1, 0)
-• Each position has a specific meaning for vehicle details
-
-Common VIN locations on vehicles:
-• Dashboard (visible through windshield)
-• Driver's side door frame
-• Vehicle registration documents
-• Insurance cards
-        """,
-        
-        "csv_format": """
-CSV File Format Requirements:
-• Must have a 'VIN' or 'VINs' column header
-• One VIN per row
-• Additional columns are preserved (Asset ID, Department, etc.)
-• Use comma as delimiter
-• UTF-8 encoding recommended
-
-Example format:
-VIN,Asset ID,Department
-1HGBH41JXMN109186,TRUCK001,Public Works
-1FTFW1ET5DKE55321,VAN002,Parks & Recreation
-        """,
-        
-        "processing_options": """
-Processing Options:
-• Max Threads: Number of parallel processing threads (1-32)
-  - Higher values = faster processing
-  - Lower values = less system resource usage
-  
-• Skip Existing VINs: Skip VINs already in output file
-  - Useful for resuming interrupted processing
-  - Prevents duplicate entries
-
-• Auto-generate filename: Creates timestamped output files
-  - Format: filename_fleet_analysis_YYYYMMDD_HHMMSS.csv
-  - Prevents accidental overwrites
-        """,
-        
-        "data_quality": """
-Data Quality Indicators:
-• High (80-100%): Complete vehicle information available
-• Medium (50-80%): Some details missing but usable
-• Low (0-50%): Limited information found
-• Failed: VIN invalid or no data found
-
-Quality factors:
-• VIN validity and format
-• Successful API data retrieval
-• Commercial vehicle data completeness
-• Cross-source data consistency
-        """
-    }
-    
-    @classmethod
-    def show_help_dialog(cls, parent, topic: str, title: str = "Help"):
-        """Show context-sensitive help dialog."""
-        help_text = cls.HELP_TOPICS.get(topic, "Help information not available for this topic.")
-        
-        # Create help dialog
-        dialog = tk.Toplevel(parent)
-        dialog.title(title)
-        dialog.resizable(True, True)
-        dialog.transient(parent)
-        
-        # Size and position
-        width = 600
-        height = 400
-        parent_x = parent.winfo_rootx()
-        parent_y = parent.winfo_rooty()
-        parent_width = parent.winfo_width()
-        parent_height = parent.winfo_height()
-        x = parent_x + (parent_width // 2) - (width // 2)
-        y = parent_y + (parent_height // 2) - (height // 2)
-        dialog.geometry(f"{width}x{height}+{x}+{y}")
-        
-        # Content frame
-        content_frame = ttk.Frame(dialog)
-        content_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
-        
-        # Help text
-        text_widget = tk.Text(
-            content_frame,
-            wrap=tk.WORD,
-            font=("Segoe UI", 10),
-            bg="#f8f9fa",
-            relief=tk.FLAT,
-            padx=10,
-            pady=10
-        )
-        text_widget.pack(fill=tk.BOTH, expand=True)
-        text_widget.insert(1.0, help_text.strip())
-        text_widget.config(state=tk.DISABLED)
-        
-        # Scrollbar
-        scrollbar = ttk.Scrollbar(content_frame, orient=tk.VERTICAL, command=text_widget.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        text_widget.configure(yscrollcommand=scrollbar.set)
-        
-        # Close button
-        button_frame = ttk.Frame(content_frame)
-        button_frame.pack(fill=tk.X, pady=(10, 0))
-        
-        ttk.Button(
-            button_frame,
-            text="Close",
-            command=dialog.destroy
-        ).pack(side=tk.RIGHT)

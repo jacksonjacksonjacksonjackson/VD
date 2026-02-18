@@ -628,7 +628,16 @@ class MainWindow:
         # Appearance preferences
         appearance_frame = ttk.Frame(prefs_notebook)
         prefs_notebook.add(appearance_frame, text="Appearance")
-        
+
+        ttk.Label(
+            appearance_frame,
+            text="Appearance settings are not yet configurable.\n\n"
+                 "The application uses the system default theme.\n"
+                 "Future options may include font size and color themes.",
+            justify=tk.LEFT,
+            wraplength=350
+        ).pack(padx=15, pady=15, anchor="nw")
+
         # Add buttons
         button_frame = ttk.Frame(prefs_dialog)
         button_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=10)
@@ -996,109 +1005,65 @@ and industry sources to ensure comprehensive and accurate specifications.
         # Get processing options
         max_threads = options.get("max_threads", 10)
         
-        # Define callbacks
+        # Define callbacks — marshal to main thread for Tkinter safety
         def log_callback(message):
-            # Update process panel log
-            self.process_panel.add_log(message)
-            
-            # Update status bar
-            self.status_bar.set(message)
-        
+            def _update_log(m=message):
+                self.process_panel.add_log(m)
+                self.status_bar.set(m)
+            self.root.after(0, _update_log)
+
         def progress_callback(current, total):
-            # Update process panel progress
-            self.process_panel.update_progress(current, total)
+            self.root.after(0, lambda c=current, t=total: self.process_panel.update_progress(c, t))
         
         def done_callback(vehicles):
-            # Add detailed logging
-            logger.info(f"🔧 DEBUG: done_callback received {len(vehicles)} vehicles")
-            logger.info(f"🔧 DEBUG: done_callback called from thread: {threading.current_thread().name}")
-            logger.info(f"🔧 DEBUG: Main thread check: {threading.current_thread() == threading.main_thread()}")
-            
             try:
                 # Update processing state
                 self.processing = False
-                
-                # Log vehicle details for debugging
-                success_count = sum(1 for v in vehicles if v.processing_success)
-                failed_count = len(vehicles) - success_count
-                logger.info(f"🔧 DEBUG: Vehicle breakdown - Success: {success_count}, Failed: {failed_count}")
-                
-                if failed_count > 0:
-                    logger.info(f"🔧 DEBUG: First few failed vehicles:")
-                    for i, v in enumerate([v for v in vehicles if not v.processing_success][:3]):
-                        logger.info(f"🔧 DEBUG: Failed vehicle {i+1}: VIN={v.vin}, Error='{v.processing_error}'")
-                
-                # Log fleet creation attempt
-                logger.info(f"🔧 DEBUG: Creating Fleet object...")
+
                 self.fleet = Fleet(
                     name=f"Fleet Analysis - {time.strftime('%Y-%m-%d')}",
                     vehicles=vehicles,
                     creation_date=datetime.datetime.now(),
                     last_modified=datetime.datetime.now()
                 )
-                logger.info(f"🔧 DEBUG: Fleet created successfully with {len(vehicles)} vehicles")
-                
+
                 # Update shared data for Present panel
                 self.sharing_data.set("fleet", self.fleet)
-                
+
                 # UI updates - ensure they happen on main thread
                 def update_ui():
                     try:
-                        logger.info(f"🔧 DEBUG: Starting UI updates on thread: {threading.current_thread().name}")
-                        
-                        # Update results panel
-                        logger.info(f"🔧 DEBUG: Calling results_panel.set_data() with {len(vehicles)} vehicles")
                         self.results_panel.set_data(vehicles)
-                        logger.info(f"🔧 DEBUG: results_panel.set_data() completed")
-                        
-                        # Update analysis panel
-                        logger.info(f"🔧 DEBUG: Calling analysis_panel.set_fleet()")
                         self.analysis_panel.set_fleet(self.fleet)
-                        logger.info(f"🔧 DEBUG: analysis_panel.set_fleet() completed")
-                        
-                        # Update present panel
-                        logger.info(f"🔧 DEBUG: Calling present_panel.refresh_data()")
                         self.present_panel.refresh_data()
-                        logger.info(f"🔧 DEBUG: present_panel.refresh_data() completed")
-                        
-                        # Update vehicle count
-                        logger.info(f"🔧 DEBUG: Updating vehicle count")
                         self.update_vehicle_count()
-                        
-                        # Update status
-                        status_msg = f"Processing complete. {len(vehicles)} vehicles processed."
-                        logger.info(f"🔧 DEBUG: Setting status: {status_msg}")
+
+                        success_count = sum(1 for v in vehicles if v.processing_success)
+                        status_msg = f"Processing complete. {success_count}/{len(vehicles)} vehicles successful."
                         self.status_bar.set(status_msg)
-                        
+
+                        # Reset process panel button states
+                        self.process_panel.processing_complete()
+
                         # Switch to results tab if there are vehicles
                         if vehicles:
-                            logger.info(f"🔧 DEBUG: Switching to results tab (notebook.select(1))")
                             self.notebook.select(1)  # Results tab
-                            logger.info(f"🔧 DEBUG: Successfully switched to results tab")
-                        else:
-                            logger.warning(f"🔧 DEBUG: No vehicles to display, staying on process tab")
-                        
-                        logger.info(f"🔧 DEBUG: All UI updates completed successfully")
-                        
+
                     except Exception as ui_e:
-                        logger.error(f"🔧 DEBUG: Exception in UI update: {ui_e}")
-                        logger.error(f"🔧 DEBUG: UI update exception type: {type(ui_e).__name__}")
+                        logger.error(f"Error updating UI after processing: {ui_e}")
                         import traceback
-                        logger.error(f"🔧 DEBUG: UI update traceback: {traceback.format_exc()}")
-                
+                        logger.error(traceback.format_exc())
+
                 # Schedule UI update on main thread if we're not on it
                 if threading.current_thread() == threading.main_thread():
-                    logger.info(f"🔧 DEBUG: Already on main thread, updating UI directly")
                     update_ui()
                 else:
-                    logger.info(f"🔧 DEBUG: Not on main thread, scheduling UI update via root.after()")
                     self.root.after(0, update_ui)
-                
+
             except Exception as e:
-                logger.error(f"🔧 DEBUG: Exception in done_callback: {e}")
-                logger.error(f"🔧 DEBUG: done_callback exception type: {type(e).__name__}")
+                logger.error(f"Error in processing completion: {e}")
                 import traceback
-                logger.error(f"🔧 DEBUG: done_callback traceback: {traceback.format_exc()}")
+                logger.error(traceback.format_exc())
         
         # Start processing
         self.processor.process_file(
@@ -1124,6 +1089,9 @@ and industry sources to ensure comprehensive and accurate specifications.
             
             # Update state
             self.processing = False
-            
+
+            # Reset process panel button states
+            self.process_panel.processing_stopped()
+
             # Update status
             self.status_bar.set("Processing stopped.")

@@ -22,12 +22,18 @@ import warnings
 
 # Web scraping libraries
 from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import TimeoutException, WebDriverException
+
+try:
+    from selenium import webdriver
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.webdriver.chrome.options import Options
+    from selenium.common.exceptions import TimeoutException, WebDriverException
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    SELENIUM_AVAILABLE = False
+    warnings.warn("selenium not installed - Selenium-based scraping will be disabled")
 
 # PDF processing
 try:
@@ -929,15 +935,15 @@ class CommercialVehicleScraper:
         
         for pattern, key in patterns:
             if key not in mpg_data:  # Don't overwrite already found values
-                            match = re.search(pattern, page_text, re.IGNORECASE)
-            if match:
-                try:
-                    mpg_value = int(match.group(1))
-                    # Validate MPG values - reject obviously wrong ones
-                    if self._is_valid_mpg(mpg_value, key):
-                        mpg_data[key] = mpg_value
-                except (ValueError, IndexError):
-                    continue
+                match = re.search(pattern, page_text, re.IGNORECASE)
+                if match:
+                    try:
+                        mpg_value = int(match.group(1))
+                        # Validate MPG values - reject obviously wrong ones
+                        if self._is_valid_mpg(mpg_value, key):
+                            mpg_data[key] = mpg_value
+                    except (ValueError, IndexError):
+                        continue
         
         return mpg_data
     
@@ -999,15 +1005,18 @@ class CommercialVehicleScraper:
         return mpg_data
     
     def _is_valid_mpg(self, mpg_value: int, mpg_type: str) -> bool:
-        """Validate if an MPG value is reasonable for commercial vehicles."""
-        # Reasonable MPG ranges for commercial vehicles
+        """Validate if an MPG value is reasonable for fleet vehicles.
+
+        Ranges expanded to include light-duty fleet vehicles like hybrid vans,
+        Transit Connect, etc. that can exceed 25 MPG combined.
+        """
         if mpg_type == 'mpg_combined':
-            return 3 <= mpg_value <= 25  # Commercial vehicles: 3-25 MPG combined
+            return 3 <= mpg_value <= 50  # Light-duty hybrids can reach ~40+ MPG
         elif mpg_type == 'mpg_city':
-            return 2 <= mpg_value <= 20  # City MPG typically lower
+            return 2 <= mpg_value <= 45  # City MPG for hybrids
         elif mpg_type == 'mpg_highway':
-            return 4 <= mpg_value <= 30  # Highway MPG typically higher
-        
+            return 4 <= mpg_value <= 55  # Highway MPG for hybrids
+
         return False
     
     def _has_useful_mpg_data(self, result: ScrapingResult) -> bool:

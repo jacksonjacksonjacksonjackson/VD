@@ -245,7 +245,27 @@ class Styles:
             borderwidth=0,
             padding=(Spacing.MD, Spacing.SM)
         )
-        
+
+        # Accent button — used for quick-action buttons (e.g. Reprocess)
+        style.configure(
+            "Accent.TButton",
+            background=Colors.INFO,
+            foreground=Colors.PRIMARY_LIGHT,
+            font=(Fonts.FAMILY_SANS, Fonts.SIZE_BODY, Fonts.WEIGHT_BOLD),
+            borderwidth=0,
+            focuscolor=Colors.INFO,
+            padding=(Spacing.MD, Spacing.SM)
+        )
+
+        style.map(
+            "Accent.TButton",
+            background=[
+                ('active', '#2B6CB0'),
+                ('pressed', '#2B6CB0'),
+                ('hover', '#3182CE')
+            ]
+        )
+
         # Entry styles
         style.configure(
             "TEntry",

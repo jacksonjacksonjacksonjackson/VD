@@ -398,18 +398,21 @@ class CsvReader:
         """
         return self.validator.validate_and_preview()
     
-    def read_vins(self) -> List[str]:
+    def read_vins(self, cached_validation: 'FileValidationResult' = None) -> List[str]:
         """
         Read VINs from the CSV file.
-        
+
+        Args:
+            cached_validation: Optional pre-validated result to avoid re-validation.
+
         Returns:
             List of all VINs and placeholders (preserves ALL rows)
         """
         vins = []
-        
+
         try:
-            # First validate the file
-            validation = self.validate_file()
+            # Use cached validation if available, otherwise validate
+            validation = cached_validation or self.validate_file()
             if not validation.valid:
                 logger.error(f"CSV validation failed: {validation.error_message}")
                 return []
@@ -417,10 +420,6 @@ class CsvReader:
             # Use detected encoding
             with open(self.file_path, 'r', newline='', encoding=validation.detected_encoding) as f:
                 reader = csv.DictReader(f)
-                
-                # Add detailed logging
-                logger.info(f"🔧 DEBUG: Starting to read VINs from {self.file_path}")
-                logger.info(f"🔧 DEBUG: VIN column detected: {validation.vin_column}")
                 
                 # Read ALL rows including invalid ones - preserve original order
                 for row_idx, row in enumerate(reader):
@@ -433,25 +432,15 @@ class CsvReader:
                         vin = str(vin_value).strip()
                     
                     if vin:
-                        # Add all VINs (valid and invalid) to preserve them in results
                         vins.append(vin)
-                        logger.debug(f"🔧 DEBUG: Row {row_idx + 1}: Added VIN {vin}")
                     else:
                         # Handle rows with missing VINs - create placeholder to preserve row
-                        if any(v for v in row.values() if v is not None and str(v).strip()):  # Row has other data but no VIN
+                        if any(v for v in row.values() if v is not None and str(v).strip()):
                             placeholder_vin = f"MISSING_VIN_ROW_{row_idx + 1}"
                             vins.append(placeholder_vin)
-                            logger.warning(f"🔧 DEBUG: Row {row_idx + 1}: Missing VIN but has other data, created placeholder: {placeholder_vin}")
                         else:
-                            # Completely empty row - create placeholder to maintain row count
                             placeholder_vin = f"EMPTY_ROW_{row_idx + 1}"
                             vins.append(placeholder_vin)
-                            logger.warning(f"🔧 DEBUG: Row {row_idx + 1}: Empty row, created placeholder: {placeholder_vin}")
-                
-                logger.info(f"🔧 DEBUG: Total VINs read from CSV: {len(vins)}")
-                valid_count = sum(1 for vin in vins if not (vin.startswith("MISSING_VIN_ROW_") or vin.startswith("EMPTY_ROW_")))
-                placeholder_count = len(vins) - valid_count
-                logger.info(f"🔧 DEBUG: Valid VINs: {valid_count}, Placeholder VINs: {placeholder_count}")
         
         except Exception as e:
             logger.error(f"Error reading CSV file: {e}")
@@ -494,24 +483,6 @@ class CsvReader:
         
         return data
     
-    def _find_vin_column(self, fieldnames: Optional[List[str]]) -> Optional[str]:
-        """
-        Find the column containing VINs in the CSV.
-        DEPRECATED: Use CsvFileValidator._find_vin_column_enhanced instead
-        
-        Args:
-            fieldnames: List of column names
-            
-        Returns:
-            Name of the VIN column or None if not found
-        """
-        # Use the enhanced validator method
-        if fieldnames:
-            validator = CsvFileValidator("")
-            return validator._find_vin_column(fieldnames)
-        return None
-
-
 class CsvWriter:
     """Handles writing fleet vehicle data to CSV files."""
     
@@ -757,46 +728,31 @@ class ProcessingPipeline:
                 
                 try:
                     success, result, vehicle = future.result()
-                    
-                    # Add detailed logging for vehicle processing
-                    logger.info(f"🔧 DEBUG: Processed VIN {vin} - Success: {success}")
-                    if vehicle:
-                        logger.info(f"🔧 DEBUG: Vehicle created - Processing success: {vehicle.processing_success}, Error: '{vehicle.processing_error}'")
-                    else:
-                        logger.warning(f"🔧 DEBUG: No vehicle object returned for VIN {vin}")
-                    
+
                     # Store result
                     self.results[vin] = {
                         "success": success,
                         "data": result,
                         "error": "" if success else result.get("error", "Unknown error")
                     }
-                    
+
                     # Always add vehicle to results (successful or failed)
                     if vehicle:
-                        # Add any additional data from the CSV
                         if vin in additional_data:
                             self._add_additional_data(vehicle, additional_data[vin])
-                            logger.debug(f"🔧 DEBUG: Added additional data to vehicle {vin}")
-                        
                         self.vehicles.append(vehicle)
-                        logger.debug(f"🔧 DEBUG: Added vehicle to collection. Total vehicles: {len(self.vehicles)}")
                     else:
-                        logger.error(f"🔧 DEBUG: Vehicle object is None for VIN {vin} - this should not happen!")
-                
+                        logger.error(f"Vehicle object is None for VIN {vin}")
+
                 except Exception as e:
                     logger.error(f"Error processing VIN {vin}: {e}")
-                    logger.error(f"🔧 DEBUG: Exception details: {type(e).__name__}: {str(e)}")
                     self.results[vin] = {
                         "success": False,
                         "data": {},
                         "error": str(e)
                     }
-                    
-                    # Create a failed vehicle for this exception
                     failed_vehicle = self._create_failed_vehicle(vin, f"Processing Exception: {str(e)}", self.vin_to_index.get(vin, processed))
                     self.vehicles.append(failed_vehicle)
-                    logger.info(f"🔧 DEBUG: Created failed vehicle for exception. Total vehicles: {len(self.vehicles)}")
                 
                 # Update progress
                 processed += 1
@@ -809,44 +765,60 @@ class ProcessingPipeline:
         
         # Step 3: Write output if path specified
         if self.output_path and not self.stop_event.is_set():
-            logger.info(f"🔧 DEBUG: Writing {len(self.vehicles)} vehicles to {self.output_path}")
             csv_writer = CsvWriter(self.output_path)
             success = csv_writer.write_vehicles(self.vehicles)
-            
+
             if success:
                 log(f"Wrote {len(self.vehicles)} vehicles to {self.output_path}")
-                logger.info(f"🔧 DEBUG: Successfully wrote {len(self.vehicles)} vehicles to CSV")
             else:
                 log(f"Failed to write output file {self.output_path}")
-                logger.error(f"🔧 DEBUG: Failed to write vehicles to CSV")
-        
-        # Step 4: Create Fleet object
-        fleet = self._create_fleet()
-        
-        # Step 5: Call done callback
-        if done_callback and not self.stop_event.is_set():
-            logger.info(f"🔧 DEBUG: Calling done_callback with {len(self.vehicles)} vehicles")
-            logger.info(f"🔧 DEBUG: done_callback invoked from thread: {threading.current_thread().name}")
-            logger.info(f"🔧 DEBUG: Is main thread: {threading.current_thread() == threading.main_thread()}")
-            
-            for i, vehicle in enumerate(self.vehicles[:5]):  # Log first 5 vehicles for debugging
-                logger.info(f"🔧 DEBUG: Vehicle {i+1}: VIN={vehicle.vin}, Success={vehicle.processing_success}, Error='{vehicle.processing_error}'")
-            if len(self.vehicles) > 5:
-                logger.info(f"🔧 DEBUG: ... and {len(self.vehicles) - 5} more vehicles")
-            
+
+        # Step 4: Assign electrification timeline (requires ACF categories)
+        if not self.stop_event.is_set():
             try:
-                logger.info(f"🔧 DEBUG: About to call done_callback function")
+                from analysis.electrification_timeline import assign_electrification_years
+                from settings import DEFAULT_ELECTRIFICATION_END_YEAR
+                assign_electrification_years(
+                    self.vehicles,
+                    end_year=DEFAULT_ELECTRIFICATION_END_YEAR
+                )
+                log(f"Electrification timeline assigned through {DEFAULT_ELECTRIFICATION_END_YEAR}")
+            except Exception as timeline_e:
+                logger.warning(f"Electrification timeline assignment failed: {timeline_e}")
+
+        # Step 4b: Match vehicles to EV equivalents (requires ACF + timeline)
+        if not self.stop_event.is_set():
+            try:
+                from analysis.ev_database import match_fleet_ev_equivalents
+                from data.models import Fleet as _Fleet
+                _temp_fleet = _Fleet(name="temp")
+                _temp_fleet.vehicles = list(self.vehicles)
+                match_fleet_ev_equivalents(_temp_fleet)
+                log("EV equivalent matching complete")
+            except Exception as ev_e:
+                logger.warning(f"EV equivalent matching failed: {ev_e}")
+
+        # Step 5: Persist API cache to disk so re-processing is fast
+        try:
+            if hasattr(self.provider, 'save_cache'):
+                self.provider.save_cache()
+        except Exception as cache_e:
+            logger.warning(f"Could not save API cache: {cache_e}")
+
+        # Step 5: Create Fleet object
+        fleet = self._create_fleet()
+
+        # Step 6: Call done callback
+        if done_callback and not self.stop_event.is_set():
+            try:
                 done_callback(self.vehicles)
-                logger.info(f"🔧 DEBUG: done_callback completed successfully")
             except Exception as callback_e:
-                logger.error(f"🔧 DEBUG: Exception in done_callback: {callback_e}")
-                logger.error(f"🔧 DEBUG: done_callback exception type: {type(callback_e).__name__}")
+                logger.error(f"Error in done_callback: {callback_e}")
                 import traceback
-                logger.error(f"🔧 DEBUG: done_callback traceback: {traceback.format_exc()}")
-                raise  # Re-raise to see the full error chain
-        
+                logger.error(traceback.format_exc())
+                raise
+
         log(f"Finished processing at {timestamp()}")
-        logger.info(f"🔧 DEBUG: Processing complete. Final vehicle count: {len(self.vehicles)}")
     
     def stop(self) -> None:
         """Stop the processing pipeline."""
@@ -883,76 +855,64 @@ class ProcessingPipeline:
                     vin, "This row was empty in the input CSV", input_order_index)
             
             # Validate VIN format first
-            logger.info(f"🔧 DIAGNOSTIC: VIN VALIDATION START: {vin}")
             is_valid, validation_error = validate_vin_detailed(vin)
             if not is_valid:
-                logger.error(f"🔧 DIAGNOSTIC: VIN VALIDATION FAILED: {vin} - {validation_error}")
                 return False, {"error": validation_error}, self._create_failed_vehicle(
                     vin, f"Invalid VIN format: {validation_error}", input_order_index)
-            logger.info(f"🔧 DIAGNOSTIC: VIN VALIDATION PASSED: {vin}")
-            
+
             # Get vehicle data from APIs
-            logger.info(f"🔧 DIAGNOSTIC: API CALL START: {vin}")
             success, data, error = self.provider.get_vehicle_by_vin(vin)
-            
+
             if not success:
-                logger.error(f"🔧 DIAGNOSTIC: API CALL FAILED: {vin} - {error}")
                 return False, {"error": error}, self._create_failed_vehicle(
                     vin, f"API Error: {error}", input_order_index)
-            logger.info(f"🔧 DIAGNOSTIC: API CALL SUCCESS: {vin}")
-            
+
             # Create successful vehicle object
-            logger.info(f"🔧 DIAGNOSTIC: VEHICLE CREATION START: {vin}")
             vehicle = self._create_vehicle_from_data(vin, data)
             vehicle.input_order_index = input_order_index
             vehicle.processing_success = True
             vehicle.processing_error = ""
-            logger.info(f"🔧 DIAGNOSTIC: VEHICLE CREATION SUCCESS: {vin}")
-            
+
+            # Track fuel type mismatch (diesel VIN matched to gasoline MPG)
+            if data.get("fuel_type_mismatch", False):
+                vehicle.custom_fields["Fuel Type Mismatch"] = "Gas proxy (diesel data unavailable)"
+
             # Calculate data quality score
-            logger.info(f"🔧 DIAGNOSTIC: QUALITY SCORE CALCULATION START: {vin}")
-            logger.info(f"🔧 DIAGNOSTIC: ENGINE DISPLACEMENT VALUE: {vin} - '{vehicle.vehicle_id.engine_displacement}'")
-            logger.info(f"🔧 DIAGNOSTIC: ENGINE CYLINDERS VALUE: {vin} - '{vehicle.vehicle_id.engine_cylinders}'")
-            
             try:
                 vehicle.data_quality_score = self._calculate_quality_score(vehicle)
-                logger.info(f"🔧 DIAGNOSTIC: QUALITY SCORE CALCULATION SUCCESS: {vin} - Score: {vehicle.data_quality_score}")
             except Exception as quality_error:
-                # Quality score calculation failed, but VIN is still valid - use default score
-                logger.warning(f"🔧 DIAGNOSTIC: QUALITY SCORE CALCULATION FAILED: {vin} - {quality_error}")
-                logger.warning(f"🔧 DIAGNOSTIC: Using default quality score for valid VIN: {vin}")
-                vehicle.data_quality_score = 50.0  # Default moderate score
-            
-            return True, data, vehicle
-            
-        except Exception as e:
-            import traceback
-            logger.error(f"🔧 DIAGNOSTIC: EXCEPTION CAUGHT IN _process_single_vin: {vin}")
-            logger.error(f"🔧 DIAGNOSTIC: EXCEPTION TYPE: {type(e).__name__}")
-            logger.error(f"🔧 DIAGNOSTIC: EXCEPTION MESSAGE: {str(e)}")
-            logger.error(f"🔧 DIAGNOSTIC: EXCEPTION TRACEBACK: {traceback.format_exc()}")
-            
-            # For data processing errors on valid VINs, create a partial success vehicle
-            # This prevents valid VINs from being marked as "Invalid VIN"
+                logger.warning(f"Quality score calculation failed for {vin}: {quality_error}")
+                vehicle.data_quality_score = 50.0
+
+            # ACF compliance classification (per-vehicle, no fleet context needed)
             try:
-                # Try to create a basic vehicle with minimal data
+                from analysis.acf_compliance import classify_acf_vehicle
+                acf_code, acf_label, acf_detail = classify_acf_vehicle(vehicle)
+                vehicle.custom_fields["ACF Category"] = acf_label
+                vehicle.custom_fields["ACF Detail"] = acf_detail
+                vehicle.custom_fields["_acf_code"] = acf_code
+            except Exception as acf_error:
+                logger.warning(f"ACF classification failed for {vin}: {acf_error}")
+
+            return True, data, vehicle
+
+        except Exception as e:
+            logger.error(f"Exception processing VIN {vin}: {e}")
+
+            # For data processing errors on valid VINs, create a partial vehicle
+            try:
                 basic_vehicle = FleetVehicle(vin=vin)
                 basic_vehicle.input_order_index = input_order_index
                 basic_vehicle.processing_success = False
                 basic_vehicle.processing_error = f"Data processing error: {str(e)}"
                 basic_vehicle.data_quality_score = 0.0
-                
-                # Set make/model to indicate processing issue rather than invalid VIN
                 basic_vehicle.vehicle_id.make = "Processing Error"
                 basic_vehicle.vehicle_id.model = "Data unavailable"
-                basic_vehicle.vehicle_id.year = "Check logs"
-                
-                logger.info(f"🔧 DIAGNOSTIC: CREATED PARTIAL VEHICLE FOR PROCESSING ERROR: {vin}")
+                basic_vehicle.vehicle_id.year = "N/A"
                 return False, {"error": str(e)}, basic_vehicle
-                
+
             except Exception as creation_error:
-                # Fallback to failed vehicle creation
-                logger.error(f"🔧 DIAGNOSTIC: FAILED TO CREATE PARTIAL VEHICLE: {vin} - {creation_error}")
+                logger.error(f"Failed to create partial vehicle for {vin}: {creation_error}")
                 return False, {"error": str(e)}, self._create_failed_vehicle(
                     vin, f"Processing Exception: {str(e)}", input_order_index)
     
@@ -1112,34 +1072,17 @@ class ProcessingPipeline:
         # Check engine specs consistency
         if vehicle.vehicle_id.engine_displacement and vehicle.vehicle_id.engine_cylinders:
             try:
-                logger.info(f"🔧 DIAGNOSTIC: ENGINE SPEC CONSISTENCY CHECK: {vehicle.vin}")
-                # Extract numeric value from engine displacement, handling formats like "361/479"
                 displacement_str = str(vehicle.vehicle_id.engine_displacement).strip()
                 cylinders_str = str(vehicle.vehicle_id.engine_cylinders).strip()
-                
-                logger.info(f"🔧 DIAGNOSTIC: DISPLACEMENT STRING: {vehicle.vin} - '{displacement_str}'")
-                logger.info(f"🔧 DIAGNOSTIC: CYLINDERS STRING: {vehicle.vin} - '{cylinders_str}'")
-                
-                # Extract first numeric value for displacement
+
                 disp_match = re.search(r'(\d+\.?\d*)', displacement_str)
                 if disp_match:
-                    logger.info(f"🔧 DIAGNOSTIC: DISPLACEMENT REGEX MATCH: {vehicle.vin} - '{disp_match.group(1)}'")
                     displacement = float(disp_match.group(1))
                     cylinders = int(cylinders_str)
-                    
-                    logger.info(f"🔧 DIAGNOSTIC: DISPLACEMENT PARSED: {vehicle.vin} - {displacement}")
-                    logger.info(f"🔧 DIAGNOSTIC: CYLINDERS PARSED: {vehicle.vin} - {cylinders}")
-                    
-                    # Reasonable displacement per cylinder (0.3-1.0L typically)
                     displacement_per_cylinder = displacement / cylinders
-                    logger.info(f"🔧 DIAGNOSTIC: DISPLACEMENT PER CYLINDER: {vehicle.vin} - {displacement_per_cylinder}")
                     if 0.3 <= displacement_per_cylinder <= 1.0:
                         bonus += 0.5
-                        logger.info(f"🔧 DIAGNOSTIC: ENGINE SPEC CONSISTENCY BONUS AWARDED: {vehicle.vin}")
-                else:
-                    logger.warning(f"🔧 DIAGNOSTIC: NO DISPLACEMENT REGEX MATCH: {vehicle.vin} - '{displacement_str}'")
-            except (ValueError, ZeroDivisionError, AttributeError) as e:
-                logger.error(f"🔧 DIAGNOSTIC: ENGINE SPEC CONSISTENCY ERROR: {vehicle.vin} - {type(e).__name__}: {str(e)}")
+            except (ValueError, ZeroDivisionError, AttributeError):
                 pass
         
         return min(bonus, 5.0)

@@ -15,34 +15,30 @@ from urllib.parse import quote
 import re
 
 from settings import (
-    NHTSA_BASE_URL, 
+    NHTSA_BASE_URL,
     NHTSA_BATCH_URL,
-    FUELECONOMY_BASE_URL, 
+    FUELECONOMY_BASE_URL,
     FUELECONOMY_MENU_URL,
-    API_TIMEOUT, 
-    MAX_RETRIES, 
+    API_TIMEOUT,
+    MAX_RETRIES,
     RETRY_DELAY,
-    RATE_LIMIT_DELAY
+    RATE_LIMIT_DELAY,
+    DEFAULT_CACHE_FILE
 )
 from utils import Cache, case_insensitive_equal, normalize_vehicle_model
 from data.models import (
-    VehicleIdentification, 
+    VehicleIdentification,
     FuelEconomyData,
     VinDecoderResponse,
     FuelEconomyResponse
 )
 
+# Register dataclass types for cache serialization/deserialization
+Cache.register_type(VinDecoderResponse)
+Cache.register_type(FuelEconomyResponse)
+
 # Set up module logger
 logger = logging.getLogger(__name__)
-
-# === DIAGNOSTIC LOGGING FOR DEBUGGING ===
-diagnostic_logger = logging.getLogger("diagnostic")
-diagnostic_logger.setLevel(logging.DEBUG)
-if not diagnostic_logger.handlers:
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter('DIAGNOSTIC: %(message)s')
-    handler.setFormatter(formatter)
-    diagnostic_logger.addHandler(handler)
 
 ###############################################################################
 # API Clients
@@ -50,16 +46,18 @@ if not diagnostic_logger.handlers:
 
 class BaseApiClient:
     """Base class for API clients with common functionality."""
-    
-    def __init__(self, cache_enabled: bool = True):
+
+    def __init__(self, cache_enabled: bool = True, shared_cache: Optional[Cache] = None):
         """
         Initialize the API client.
-        
+
         Args:
             cache_enabled: Whether to use caching
+            shared_cache: Optional shared Cache instance (enables disk persistence
+                          when multiple clients share the same cache)
         """
         self.cache_enabled = cache_enabled
-        self.cache = Cache() if cache_enabled else None
+        self.cache = shared_cache if shared_cache else (Cache() if cache_enabled else None)
         self.session = requests.Session()
     
     def _get_from_cache(self, cache_key: str) -> Optional[Any]:
@@ -154,92 +152,70 @@ class VinDecoderClient(BaseApiClient):
         Returns:
             VinDecoderResponse object with results or error
         """
-        diagnostic_logger.info(f"=== VIN DECODE START: {vin} ===")
-        
         if not vin:
-            diagnostic_logger.error(f"VIN DECODE FAILED: Empty VIN provided")
             return VinDecoderResponse(
                 success=False,
                 error_message="VIN cannot be empty",
                 vin=vin
             )
-        
+
         # Check cache first
         cache_key = f"vin_{vin}"
         cached_data = self._get_from_cache(cache_key)
         if cached_data:
-            diagnostic_logger.info(f"VIN DECODE CACHE HIT: {vin}")
             return cached_data
-        
-        # Build URL
+
+        # Build URL and make request
         url = f"{NHTSA_BASE_URL}{quote(vin)}?format=json"
-        diagnostic_logger.info(f"VIN DECODE API REQUEST: {url}")
-        
-        # Make request
         success, response, error = self._make_request(url)
-        
+
         if not success:
-            diagnostic_logger.error(f"VIN DECODE API FAILED: {vin} - {error}")
+            logger.warning(f"VIN decode API failed for {vin}: {error}")
             return VinDecoderResponse(
                 success=False,
                 error_message=error,
                 vin=vin
             )
-        
+
         # Parse response
         try:
             data = response.json()
-            diagnostic_logger.info(f"VIN DECODE API SUCCESS: {vin} - Response received")
-            diagnostic_logger.debug(f"VIN DECODE RAW RESPONSE: {vin} - {data}")
-            
             results = data.get("Results", [])
-            
+
             if not results:
-                diagnostic_logger.error(f"VIN DECODE NO RESULTS: {vin} - API returned empty results")
                 return VinDecoderResponse(
                     success=False,
                     error_message="No results returned from API",
                     vin=vin
                 )
-            
-            # NHTSA API returns a list, but we only need the first item
+
             result = results[0]
-            diagnostic_logger.debug(f"VIN DECODE FIRST RESULT: {vin} - {result}")
-            
+
             # Check if we got essential data
             year = result.get("ModelYear", "").strip()
             make = result.get("Make", "").strip()
             model = result.get("Model", "").strip()
-            
-            diagnostic_logger.info(f"VIN DECODE EXTRACTED DATA: {vin} - Year: '{year}', Make: '{make}', Model: '{model}'")
-            
+
             if not (year and make and model):
-                diagnostic_logger.error(f"VIN DECODE INCOMPLETE DATA: {vin} - Missing essential fields")
-                diagnostic_logger.error(f"VIN DECODE MISSING: Year='{year}', Make='{make}', Model='{model}'")
+                logger.warning(f"Incomplete VIN data for {vin}: year='{year}', make='{make}', model='{model}'")
                 return VinDecoderResponse(
                     success=False,
                     error_message="Incomplete vehicle data returned",
                     vin=vin,
                     data=result
                 )
-            
-            # Success - create response
+
+            # Success - cache and return
             vin_response = VinDecoderResponse(
                 success=True,
                 vin=vin,
                 data=result
             )
-            
-            diagnostic_logger.info(f"VIN DECODE SUCCESS: {vin} - Complete data received")
-            
-            # Cache successful response
             self._save_to_cache(cache_key, vin_response)
-            
             return vin_response
-            
+
         except Exception as e:
-            diagnostic_logger.error(f"VIN DECODE PARSING ERROR: {vin} - {e}")
-            logger.error(f"Error parsing VIN decoder response: {e}")
+            logger.error(f"Error parsing VIN decoder response for {vin}: {e}")
             return VinDecoderResponse(
                 success=False,
                 error_message=f"Error parsing response: {e}",
@@ -482,83 +458,78 @@ class FuelEconomyClient(BaseApiClient):
                 vehicle_id=vehicle_id
             )
     
-    def find_vehicle_matches(self, year: str, make: str, model: str, 
-                          engine_disp: str = None) -> List[Dict[str, str]]:
+    def find_vehicle_matches(self, year: str, make: str, model: str,
+                          engine_disp: str = None,
+                          is_diesel: bool = False) -> List[Dict[str, str]]:
         """
         Find vehicle matches in the FuelEconomy.gov database.
-        
+
         Args:
             year: Model year
             make: Manufacturer
             model: Model name
             engine_disp: Engine displacement (optional)
-            
+            is_diesel: Whether the VIN indicates a diesel engine
+
         Returns:
             List of matching vehicle options
         """
-        diagnostic_logger.info(f"=== FUEL ECONOMY SEARCH START ===")
-        diagnostic_logger.info(f"SEARCH CRITERIA: Year='{year}', Make='{make}', Model='{model}', Engine='{engine_disp}'")
-        
         # Step 1: Get available models for this year and make
-        diagnostic_logger.info(f"STEP 1: Fetching available models for {year} {make}")
         available_models = self.fetch_menu("model", {"year": year, "make": make})
-        diagnostic_logger.info(f"AVAILABLE MODELS COUNT: {len(available_models)}")
-        
+
         if not available_models:
-            diagnostic_logger.error(f"NO MODELS FOUND: Year='{year}', Make='{make}'")
+            logger.debug(f"No models found for {year} {make}")
             return []
-        
-        # Log available models for debugging
-        for i, model_item in enumerate(available_models[:5]):
-            diagnostic_logger.debug(f"AVAILABLE MODEL {i+1}: {model_item}")
-        
+
         # Step 2: Find the best matching model
-        diagnostic_logger.info(f"STEP 2: Finding best model match for '{model}'")
         best_model_match = self._find_best_model_match(available_models, model)
-        
+
         if not best_model_match:
-            diagnostic_logger.warning(f"NO MODEL MATCH FOUND for '{model}'")
-            diagnostic_logger.warning(f"AVAILABLE MODELS:")
-            for model_item in available_models[:10]:
-                diagnostic_logger.warning(f"  AVAILABLE: {model_item.get('text', '')}")
+            logger.debug(f"No model match for '{model}' in {year} {make}")
             return []
-        
-        diagnostic_logger.info(f"BEST MODEL MATCH: {best_model_match}")
-        
+
         # Step 3: Get vehicle options for the matched model
-        diagnostic_logger.info(f"STEP 3: Fetching vehicle options")
         options = self.fetch_menu("options", {
-            "year": year, 
-            "make": make, 
+            "year": year,
+            "make": make,
             "model": best_model_match["value"]
         })
-        diagnostic_logger.info(f"VEHICLE OPTIONS COUNT: {len(options)}")
-        
+
         if not options:
-            diagnostic_logger.error(f"NO OPTIONS FROM API: Year='{year}', Make='{make}', Model='{best_model_match['value']}'")
             return []
-        
-        # Log first few options for debugging
-        for i, option in enumerate(options[:5]):
-            diagnostic_logger.debug(f"OPTION {i+1}: {option}")
-        
+
         # Step 4: Filter by engine displacement if specified
         if engine_disp:
-            diagnostic_logger.info(f"STEP 4: Filtering by engine displacement '{engine_disp}'")
             filtered_options = self._filter_options_by_engine(options, engine_disp)
-            diagnostic_logger.info(f"FILTERED OPTIONS COUNT: {len(filtered_options)}")
-            
-            if not filtered_options:
-                diagnostic_logger.warning(f"NO MATCHES AFTER ENGINE FILTERING: Engine='{engine_disp}'")
-                diagnostic_logger.warning(f"AVAILABLE OPTIONS:")
-                for option in options[:5]:
-                    diagnostic_logger.warning(f"  AVAILABLE: {option.get('text', '')}")
-                # Return all options if no engine match
-                return options
-            return filtered_options
-        else:
-            diagnostic_logger.info(f"STEP 4: No engine filtering - returning all options")
-            return options
+            if filtered_options:
+                options = filtered_options
+            # If no engine match, keep all options as fallback
+
+        # Step 5: Filter by fuel type for diesel vehicles
+        if is_diesel:
+            diesel_options = self._filter_options_by_fuel_type(options, diesel=True)
+            if diesel_options:
+                return diesel_options
+            # No diesel options found — fall back to all options.
+            # Caller (get_vehicle_by_vin) will detect the mismatch.
+            logger.info(f"No diesel options for {year} {make} {model}; falling back to gasoline")
+
+        return options
+
+    @staticmethod
+    def _filter_options_by_fuel_type(options: List[Dict[str, str]],
+                                     diesel: bool = True) -> List[Dict[str, str]]:
+        """Filter vehicle options by fuel type keywords in the option text."""
+        diesel_keywords = {"diesel", "biodiesel", "b20"}
+        filtered = []
+        for opt in options:
+            text_lower = opt.get("text", "").lower()
+            has_diesel_kw = any(kw in text_lower for kw in diesel_keywords)
+            if diesel and has_diesel_kw:
+                filtered.append(opt)
+            elif not diesel and not has_diesel_kw:
+                filtered.append(opt)
+        return filtered
     
 
     
@@ -577,15 +548,13 @@ class FuelEconomyClient(BaseApiClient):
             return None
         
         target_normalized = normalize_vehicle_model(target_model).lower()
-        diagnostic_logger.info(f"NORMALIZED TARGET MODEL: '{target_normalized}'")
-        
+
         # Try exact match first
         for model in available_models:
             model_value = model.get("value", "").lower()
             model_text = model.get("text", "").lower()
-            
+
             if target_normalized == model_value or target_normalized == model_text:
-                diagnostic_logger.info(f"EXACT MATCH FOUND: {model}")
                 return model
         
         # Try partial match
@@ -614,16 +583,9 @@ class FuelEconomyClient(BaseApiClient):
             if score > 0:
                 score -= len(model_text) * 0.1
             
-            diagnostic_logger.debug(f"MODEL SCORE: '{model_text}' = {score}")
-            
             if score > best_score:
                 best_score = score
                 best_match = model
-        
-        if best_match:
-            diagnostic_logger.info(f"BEST PARTIAL MATCH: {best_match} (score: {best_score})")
-        else:
-            diagnostic_logger.warning(f"NO MODEL MATCH FOUND for '{target_model}'")
         
         return best_match
     
@@ -641,35 +603,28 @@ class FuelEconomyClient(BaseApiClient):
         if not engine_disp:
             return options
         
-        diagnostic_logger.info(f"FILTERING BY ENGINE: '{engine_disp}'")
         filtered = []
-        
-        # Normalize engine displacement for matching
         engine_normalized = engine_disp.lower().replace(" ", "")
-        
+
         for option in options:
             option_text = option.get("text", "").lower()
-            
+
             # Check for direct match
             if engine_disp.lower() in option_text:
-                diagnostic_logger.debug(f"ENGINE MATCH: '{engine_disp}' found in '{option_text}'")
                 filtered.append(option)
                 continue
-            
+
             # Check for normalized match (e.g., "2.0L" vs "2.0 L")
             if engine_normalized in option_text.replace(" ", ""):
-                diagnostic_logger.debug(f"ENGINE NORMALIZED MATCH: '{engine_normalized}' found in '{option_text}'")
                 filtered.append(option)
                 continue
-            
+
             # Check for displacement patterns (e.g., "2.0" in "2.0 L, Turbo")
             import re
             engine_pattern = re.escape(engine_disp.replace("L", "").replace("l", "").strip())
             if re.search(rf"{engine_pattern}\s*l", option_text, re.IGNORECASE):
-                diagnostic_logger.debug(f"ENGINE PATTERN MATCH: '{engine_pattern}' found in '{option_text}'")
                 filtered.append(option)
-        
-        diagnostic_logger.info(f"ENGINE FILTERING RESULT: {len(filtered)} matches from {len(options)} options")
+
         return filtered
     
     def pick_best_match(self, options: List[Dict[str, str]], year: str, make: str, 
@@ -740,16 +695,32 @@ class VehicleDataProvider:
     Combines VIN decoding and fuel economy data retrieval.
     Provides a unified interface for getting comprehensive vehicle data.
     """
-    
+
     def __init__(self, cache_enabled: bool = True):
         """
         Initialize the vehicle data provider.
-        
+
         Args:
             cache_enabled: Whether to use caching
         """
-        self.vin_client = VinDecoderClient(cache_enabled=cache_enabled)
-        self.fe_client = FuelEconomyClient(cache_enabled=cache_enabled)
+        # Create a single persistent cache shared by both API clients.
+        # On init it loads previously cached API responses from disk so
+        # re-processing the same fleet is nearly instant.
+        if cache_enabled:
+            self._shared_cache = Cache(file_path=DEFAULT_CACHE_FILE)
+        else:
+            self._shared_cache = None
+
+        self.vin_client = VinDecoderClient(
+            cache_enabled=cache_enabled, shared_cache=self._shared_cache)
+        self.fe_client = FuelEconomyClient(
+            cache_enabled=cache_enabled, shared_cache=self._shared_cache)
+
+    def save_cache(self) -> bool:
+        """Persist the shared API cache to disk. Call after processing completes."""
+        if self._shared_cache:
+            return self._shared_cache.save_to_disk()
+        return False
     
     def get_vehicle_by_vin(self, vin: str) -> Tuple[bool, Dict[str, Any], str]:
         """
@@ -761,50 +732,36 @@ class VehicleDataProvider:
         Returns:
             Tuple of (success, data, error_message)
         """
-        diagnostic_logger.info(f"=== VEHICLE DATA PIPELINE START: {vin} ===")
-        
         # Step 1: Decode VIN
-        diagnostic_logger.info(f"STEP 1 - VIN DECODING: {vin}")
         vin_response = self.vin_client.decode_vin(vin)
-        
+
         if not vin_response.success:
-            diagnostic_logger.error(f"PIPELINE FAILED AT STEP 1: {vin} - {vin_response.error_message}")
             return False, {}, vin_response.error_message
-        
+
         vehicle_id = vin_response.to_vehicle_id()
-        diagnostic_logger.info(f"STEP 1 SUCCESS: {vin} - {vehicle_id.year} {vehicle_id.make} {vehicle_id.model}")
-        
+
         # Step 2: Find matching vehicles in FuelEconomy.gov
-        diagnostic_logger.info(f"STEP 2 - FUEL ECONOMY MATCHING: {vin}")
-        diagnostic_logger.info(f"MATCHING CRITERIA: Year='{vehicle_id.year}', Make='{vehicle_id.make}', Model='{vehicle_id.model}', Engine='{vehicle_id.engine_displacement}'")
-        
         options = self.fe_client.find_vehicle_matches(
             year=vehicle_id.year,
             make=vehicle_id.make,
             model=vehicle_id.model,
-            engine_disp=vehicle_id.engine_displacement
+            engine_disp=vehicle_id.engine_displacement,
+            is_diesel=vehicle_id.is_diesel
         )
-        
-        diagnostic_logger.info(f"FUEL ECONOMY MATCHES FOUND: {vin} - {len(options)} options")
-        if options:
-            for i, option in enumerate(options[:3]):  # Log first 3 matches
-                diagnostic_logger.debug(f"MATCH OPTION {i+1}: {option}")
-        
-        # No matches found
+
+        # No matches found — return basic data without fuel economy
         if not options:
-            diagnostic_logger.warning(f"STEP 2 NO MATCHES: {vin} - No fuel economy data found")
-            # Return basic data from VIN decoder without fuel economy
             return True, {
                 "vin": vin,
                 "vehicle_id": vehicle_id.to_dict(),
                 "fuel_economy": FuelEconomyData().to_dict(),
                 "match_confidence": 0.0,
                 "assumed_vehicle_id": "",
-                "assumed_vehicle_text": ""
+                "assumed_vehicle_text": "",
+                "fuel_type_mismatch": False
             }, "No matching vehicles found in fuel economy database"
-        
+
         # Step 3: Pick best match
-        diagnostic_logger.info(f"STEP 3 - BEST MATCH SELECTION: {vin}")
         best_match = self.fe_client.pick_best_match(
             options=options,
             year=vehicle_id.year,
@@ -812,51 +769,53 @@ class VehicleDataProvider:
             model=vehicle_id.model,
             engine_disp=vehicle_id.engine_displacement
         )
-        
-        # Use first option if no best match found
+
         if not best_match:
             best_match = options[0]
-            diagnostic_logger.warning(f"STEP 3 FALLBACK: {vin} - Using first option as best match")
-        
-        diagnostic_logger.info(f"STEP 3 BEST MATCH: {vin} - ID='{best_match['value']}', Text='{best_match['text']}'")
-        
-        # Step 4: Get detailed fuel economy data
-        diagnostic_logger.info(f"STEP 4 - FUEL ECONOMY DETAILS: {vin}")
+
+        # Step 4: Detect fuel type mismatch (diesel VIN matched to gas data)
+        fuel_type_mismatch = False
+        if vehicle_id.is_diesel:
+            match_text_lower = best_match.get("text", "").lower()
+            diesel_kws = {"diesel", "biodiesel", "b20"}
+            if not any(kw in match_text_lower for kw in diesel_kws):
+                fuel_type_mismatch = True
+                logger.warning(
+                    f"Diesel vehicle {vin} matched to gasoline data: {best_match.get('text', '')}"
+                )
+
+        # Step 5: Get detailed fuel economy data
         fe_response = self.fe_client.fetch_vehicle_details(best_match["value"])
-        
+
         if not fe_response.success:
-            diagnostic_logger.error(f"STEP 4 FAILED: {vin} - {fe_response.error_message}")
-            # Return basic data without fuel economy
             return True, {
                 "vin": vin,
                 "vehicle_id": vehicle_id.to_dict(),
                 "fuel_economy": FuelEconomyData().to_dict(),
-                "match_confidence": 30.0,  # Low confidence
+                "match_confidence": 30.0,
                 "assumed_vehicle_id": best_match["value"],
-                "assumed_vehicle_text": best_match["text"]
+                "assumed_vehicle_text": best_match["text"],
+                "fuel_type_mismatch": fuel_type_mismatch
             }, f"Error retrieving fuel economy data: {fe_response.error_message}"
-        
-        # Step 5: Combine all data
-        diagnostic_logger.info(f"STEP 5 - DATA COMBINATION: {vin}")
+
+        # Step 6: Combine all data
         fuel_economy = fe_response.to_fuel_economy()
-        
-        # Calculate match confidence
         match_confidence = self._calculate_match_confidence(
             vehicle_id, fuel_economy.raw_data, best_match["text"]
         )
-        
-        diagnostic_logger.info(f"FINAL MATCH CONFIDENCE: {vin} - {match_confidence}%")
-        diagnostic_logger.info(f"FINAL MPG DATA: {vin} - Combined: {fuel_economy.combined_mpg}, City: {fuel_economy.city_mpg}, Highway: {fuel_economy.highway_mpg}")
-        diagnostic_logger.info(f"=== VEHICLE DATA PIPELINE SUCCESS: {vin} ===")
-        
-        # Return complete data
+
+        # Penalize confidence for fuel type mismatch
+        if fuel_type_mismatch:
+            match_confidence = max(0.0, match_confidence - 15.0)
+
         return True, {
             "vin": vin,
             "vehicle_id": vehicle_id.to_dict(),
             "fuel_economy": fuel_economy.to_dict(),
             "match_confidence": match_confidence,
             "assumed_vehicle_id": best_match["value"],
-            "assumed_vehicle_text": best_match["text"]
+            "assumed_vehicle_text": best_match["text"],
+            "fuel_type_mismatch": fuel_type_mismatch
         }, ""
     
     def get_vehicles_by_vins(self, vins: List[str]) -> Dict[str, Dict[str, Any]]:

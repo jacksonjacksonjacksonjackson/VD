@@ -8,6 +8,7 @@ Fleet Electrification Analyzer.
 import os
 import logging
 import threading
+import subprocess
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from typing import Dict, List, Any, Optional, Callable, Tuple
@@ -37,6 +38,10 @@ from analysis.calculations import (
 )
 from analysis.charts import ChartFactory
 from analysis.reports import ReportGeneratorFactory, ExportCoordinator
+from analysis.rate_database import get_rates_for_state, get_all_incentives, get_available_states
+
+# Set up module logger (must be before any try/except blocks that use it)
+logger = logging.getLogger(__name__)
 
 # Import PowerPoint export functionality
 try:
@@ -45,9 +50,6 @@ try:
 except ImportError:
     PPTX_EXPORT_AVAILABLE = False
     logger.warning("PowerPoint export not available - powerpoint_export module not found")
-
-# Set up module logger
-logger = logging.getLogger(__name__)
 
 # Charging power level constants
 CHARGING_POWER_LEVELS = {
@@ -96,6 +98,7 @@ class AnalysisPanel(ttk.Frame):
         self.charging_pattern_var = tk.StringVar(value="standard")
         self.charging_start_var = tk.IntVar(value=18)  # 6 PM
         self.charging_end_var = tk.IntVar(value=6)     # 6 AM
+        self.power_level_var = tk.StringVar(value="LP")  # Default to Level 2
         
         # Analysis results
         self.electrification_analysis = None
@@ -114,9 +117,12 @@ class AnalysisPanel(ttk.Frame):
         self.paned_window = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         self.paned_window.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # Create left panel (controls)
-        self.left_panel = ttk.Frame(self.paned_window)
-        self.paned_window.add(self.left_panel, weight=30)
+        # Create left panel container (will hold scrollable canvas)
+        left_panel_container = ttk.Frame(self.paned_window)
+        self.paned_window.add(left_panel_container, weight=30)
+        
+        # Create scrollable left panel
+        self._create_scrollable_left_panel(left_panel_container)
         
         # Create right panel (charts)
         self.right_panel = ttk.Frame(self.paned_window)
@@ -127,6 +133,49 @@ class AnalysisPanel(ttk.Frame):
         
         # Create chart area in right panel
         self._create_right_panel()
+    
+    def _create_scrollable_left_panel(self, container):
+        """Create a scrollable container for the left panel controls."""
+        # Create canvas and scrollbar
+        self.left_canvas = tk.Canvas(container, bg="#f0f0f0", highlightthickness=0)
+        left_scrollbar = ttk.Scrollbar(container, orient="vertical", command=self.left_canvas.yview)
+        
+        # Create the actual left panel frame inside canvas
+        self.left_panel = ttk.Frame(self.left_canvas)
+        
+        # Configure canvas scrolling
+        self.left_panel.bind(
+            "<Configure>",
+            lambda e: self.left_canvas.configure(scrollregion=self.left_canvas.bbox("all"))
+        )
+        
+        # Create window in canvas
+        self.left_canvas_window = self.left_canvas.create_window((0, 0), window=self.left_panel, anchor="nw")
+        self.left_canvas.configure(yscrollcommand=left_scrollbar.set)
+        
+        # Pack canvas and scrollbar
+        self.left_canvas.pack(side="left", fill="both", expand=True)
+        left_scrollbar.pack(side="right", fill="y")
+        
+        # Enable mousewheel scrolling
+        def on_mousewheel(event):
+            self.left_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        
+        def on_enter(event):
+            self.left_canvas.bind_all("<MouseWheel>", on_mousewheel)
+        
+        def on_leave(event):
+            self.left_canvas.unbind_all("<MouseWheel>")
+        
+        # Bind mousewheel only when mouse is over left panel
+        self.left_canvas.bind("<Enter>", on_enter)
+        self.left_canvas.bind("<Leave>", on_leave)
+        
+        # Bind canvas width to frame width for proper horizontal sizing
+        def on_canvas_configure(event):
+            self.left_canvas.itemconfig(self.left_canvas_window, width=event.width)
+        
+        self.left_canvas.bind("<Configure>", on_canvas_configure)
     
     def _create_left_panel(self):
         """Create analysis controls in the left panel."""
@@ -151,7 +200,27 @@ class AnalysisPanel(ttk.Frame):
         # Cost Parameters Tab
         cost_frame = ttk.LabelFrame(params_notebook, text="Cost Parameters")
         params_notebook.add(cost_frame, text="Costs")
-        
+
+        # State selector — auto-populates gas/electricity prices
+        state_frame = ttk.Frame(cost_frame)
+        state_frame.pack(fill=tk.X, padx=5, pady=(5, 2))
+        state_label = ttk.Label(state_frame, text="State:")
+        state_label.pack(side=tk.LEFT)
+        self.state_var = tk.StringVar(value="")
+        state_options = ["(National Avg)"] + get_available_states()
+        state_combo = ttk.Combobox(
+            state_frame, textvariable=self.state_var,
+            values=state_options, state="readonly", width=12
+        )
+        state_combo.pack(side=tk.RIGHT)
+        state_combo.bind("<<ComboboxSelected>>", self._on_state_selected)
+        SimpleTooltip(state_label, "Select state to auto-populate gas and electricity prices")
+
+        # Incentives display label (updated when state changes)
+        self.incentive_label = ttk.Label(cost_frame, text="", font=("", 8),
+                                         foreground="#555555", wraplength=220)
+        self.incentive_label.pack(fill=tk.X, padx=5, pady=(0, 2))
+
         # Gas price
         gas_frame = ttk.Frame(cost_frame)
         gas_frame.pack(fill=tk.X, padx=5, pady=2)
@@ -243,7 +312,17 @@ class AnalysisPanel(ttk.Frame):
             
             # kW label
             ttk.Label(entry_frame, text="kW").grid(row=0, column=1, sticky="w")
-        
+
+            # Radio button for selecting active power level
+            ttk.Radiobutton(
+                entry_frame, text="", variable=self.power_level_var, value=level
+            ).grid(row=0, column=2, padx=(5, 0))
+
+        # Active level hint
+        ttk.Label(power_frame, text="Select active charging level with radio buttons",
+                  font=("", 8)).grid(row=len(power_labels), column=0, columnspan=2,
+                                     sticky="w", padx=10, pady=(2, 5))
+
         # Charging Pattern
         pattern_frame = ttk.Frame(charging_frame)
         pattern_frame.pack(fill=tk.X, padx=5, pady=(10, 2))
@@ -312,99 +391,132 @@ class AnalysisPanel(ttk.Frame):
         # Analysis buttons container
         buttons_frame = ttk.LabelFrame(self.left_panel, text="Run Analysis")
         buttons_frame.pack(fill=tk.X, pady=(0, Spacing.MARGIN_ELEMENT))
-        
-        # Electrification button (PRIMARY GREEN - main analysis)
+
+        # Run Full Analysis button (ACCENT — primary action)
+        full_btn = ttk.Button(
+            buttons_frame,
+            text="Run Full Analysis",
+            command=self.run_full_analysis,
+            style="Accent.TButton"
+        )
+        full_btn.pack(fill=tk.X, padx=Spacing.SM, pady=Spacing.SM)
+        SimpleTooltip(full_btn, "Run all three analyses in sequence:\nElectrification → Emissions → Charging\nThen display KPI summary and charts")
+
+        # Separator
+        ttk.Separator(buttons_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=Spacing.SM, pady=2)
+
+        # Individual analysis buttons (for running one at a time)
         electrify_btn = ttk.Button(
             buttons_frame,
-            text="⚡ Electrification Analysis",
+            text="Electrification Analysis",
             command=self.run_electrification_analysis,
             style="Primary.TButton"
         )
-        electrify_btn.pack(fill=tk.X, padx=Spacing.SM, pady=Spacing.SM)
-        SimpleTooltip(electrify_btn, "Comprehensive electrification analysis\n• Identifies suitable vehicles for conversion\n• Calculates Total Cost of Ownership (TCO)\n• Projects savings and ROI over analysis period")
-        
-        # Emissions button (SECONDARY - supporting analysis)
+        electrify_btn.pack(fill=tk.X, padx=Spacing.SM, pady=(Spacing.SM, 2))
+        SimpleTooltip(electrify_btn, "TCO, ROI, and savings analysis")
+
         emissions_btn = ttk.Button(
             buttons_frame,
-            text="🌱 Emissions Analysis",
+            text="Emissions Analysis",
             command=self.run_emissions_analysis,
             style="Secondary.TButton"
         )
-        emissions_btn.pack(fill=tk.X, padx=Spacing.SM, pady=Spacing.SM)
-        SimpleTooltip(emissions_btn, "Create detailed emissions inventory\n• Baseline CO₂e emissions by vehicle\n• Reduction potential from electrification\n• Environmental impact metrics")
-        
-        # Charging button (SECONDARY - supporting analysis)
+        emissions_btn.pack(fill=tk.X, padx=Spacing.SM, pady=2)
+        SimpleTooltip(emissions_btn, "CO₂e inventory and reduction potential")
+
         charging_btn = ttk.Button(
             buttons_frame,
-            text="🔌 Charging Analysis",
+            text="Charging Analysis",
             command=self.run_charging_analysis,
             style="Secondary.TButton"
         )
-        charging_btn.pack(fill=tk.X, padx=Spacing.SM, pady=Spacing.SM)
-        SimpleTooltip(charging_btn, "Analyze charging infrastructure needs\n• Required charger types and quantities\n• Power demand and load profiles\n• Installation costs and timeline estimates")
+        charging_btn.pack(fill=tk.X, padx=Spacing.SM, pady=(2, Spacing.SM))
+        SimpleTooltip(charging_btn, "Infrastructure requirements and costs")
     
     def _create_results_summary(self):
-        """Create the results summary section."""
-        # Summary container
-        summary_frame = ttk.LabelFrame(self.left_panel, text="Results Summary")
+        """Create the KPI cards results summary section."""
+        summary_frame = ttk.LabelFrame(self.left_panel, text="Key Metrics")
         summary_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
-        
-        # Summary text
+
+        # KPI cards container — 2 columns
+        self.kpi_frame = ttk.Frame(summary_frame)
+        self.kpi_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.kpi_frame.grid_columnconfigure(0, weight=1)
+        self.kpi_frame.grid_columnconfigure(1, weight=1)
+
+        # Define KPI slots (will be populated by _update_summary)
+        self.kpi_labels = {}
+        kpi_defs = [
+            ("fleet_size", "Fleet Size", "—"),
+            ("avg_mpg", "Avg MPG", "—"),
+            ("annual_savings", "Annual Savings", "—"),
+            ("co2_reduction", "CO₂ Reduction", "—"),
+            ("payback", "Avg Payback", "—"),
+            ("infra_cost", "Infrastructure", "—"),
+        ]
+
+        for idx, (key, title, default) in enumerate(kpi_defs):
+            row, col = divmod(idx, 2)
+            card = ttk.Frame(self.kpi_frame, relief="solid", borderwidth=1)
+            card.grid(row=row, column=col, padx=3, pady=3, sticky="nsew")
+            self.kpi_frame.grid_rowconfigure(row, weight=1)
+
+            title_lbl = ttk.Label(card, text=title, font=("", 8),
+                                 foreground="#777777")
+            title_lbl.pack(anchor="w", padx=6, pady=(4, 0))
+
+            value_lbl = ttk.Label(card, text=default, font=("", 13, "bold"),
+                                 foreground=PRIMARY_HEX_1)
+            value_lbl.pack(anchor="w", padx=6, pady=(0, 4))
+
+            self.kpi_labels[key] = value_lbl
+
+        # Detailed summary text (collapsed, smaller)
         self.summary_text = tk.Text(
             summary_frame,
             wrap=tk.WORD,
             width=30,
-            height=10,
+            height=6,
             bg=PRIMARY_HEX_2,
-            state=tk.DISABLED
+            state=tk.DISABLED,
+            font=("", 9),
         )
-        self.summary_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        # Add scrollbar
+        self.summary_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=(0, 5))
+
         summary_scrollbar = ttk.Scrollbar(summary_frame, command=self.summary_text.yview)
         summary_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.summary_text.config(yscrollcommand=summary_scrollbar.set)
-        
-        # Configure text tags
-        self.summary_text.tag_configure("heading", font=("", 10, "bold"), foreground=PRIMARY_HEX_1)
-        self.summary_text.tag_configure("value", font=("", 9, ""), foreground=SECONDARY_HEX_1)
+
+        self.summary_text.tag_configure("heading", font=("", 9, "bold"), foreground=PRIMARY_HEX_1)
+        self.summary_text.tag_configure("value", font=("", 8, ""), foreground=SECONDARY_HEX_1)
         self.summary_text.tag_configure("separator", foreground=PRIMARY_HEX_3)
     
     def _create_export_section(self):
         """Create the export options section."""
-        # Export container
-        export_frame = ttk.LabelFrame(self.left_panel, text="Export Results")
+        export_frame = ttk.LabelFrame(self.left_panel, text="Export & Present")
         export_frame.pack(fill=tk.X, pady=(0, Spacing.MARGIN_ELEMENT))
-        
-        # Export PowerPoint button (PRIMARY GREEN - main export for demo)
-        pptx_btn = ttk.Button(
+
+        # Build Presentation button (navigates to Present tab)
+        present_btn = ttk.Button(
             export_frame,
-            text="📊 Export PowerPoint",
-            command=self.export_preliminary_deck,
+            text="Build Presentation",
+            command=self._navigate_to_present,
+            style="Accent.TButton"
+        )
+        present_btn.pack(fill=tk.X, padx=Spacing.SM, pady=Spacing.SM)
+        SimpleTooltip(present_btn, "Switch to the Present tab to configure\nand generate a PowerPoint deck")
+
+        ttk.Separator(export_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=Spacing.SM, pady=2)
+
+        # Single Export button with format selection
+        export_btn = ttk.Button(
+            export_frame,
+            text="Export",
+            command=self._export_menu,
             style="Primary.TButton"
         )
-        pptx_btn.pack(fill=tk.X, padx=Spacing.SM, pady=Spacing.SM)
-        SimpleTooltip(pptx_btn, "Generate professional PowerPoint presentation\n• Native editable charts with real data\n• Executive summary with key findings\n• Ready for stakeholder meetings")
-        
-        # Export report button (SECONDARY - detailed report)
-        report_btn = ttk.Button(
-            export_frame,
-            text="📄 Export Full Report",
-            command=self.export_full_report,
-            style="Secondary.TButton"
-        )
-        report_btn.pack(fill=tk.X, padx=Spacing.SM, pady=Spacing.SM)
-        SimpleTooltip(report_btn, "Export comprehensive analysis report\n• Detailed findings and recommendations\n• Supports Excel, PDF, and CSV formats")
-        
-        # Export chart button (SECONDARY - single chart)
-        chart_btn = ttk.Button(
-            export_frame,
-            text="📈 Export Current Chart",
-            command=self.export_current_chart,
-            style="Secondary.TButton"
-        )
-        chart_btn.pack(fill=tk.X, padx=Spacing.SM, pady=Spacing.SM)
-        SimpleTooltip(chart_btn, "Export current chart as image\n• High resolution PNG or SVG\n• Suitable for reports and documents")
+        export_btn.pack(fill=tk.X, padx=Spacing.SM, pady=Spacing.SM)
+        SimpleTooltip(export_btn, "Export analysis results:\n• PowerPoint, Excel, or chart image")
     
     def _create_right_panel(self):
         """Create the chart display area in the right panel."""
@@ -558,20 +670,32 @@ class AnalysisPanel(ttk.Frame):
                 edgecolor='none'
             )
             
-            # Copy to clipboard using system command
-            if os.system == 'Darwin':  # macOS
-                os.system(f"osascript -e 'set the clipboard to (read (POSIX file \"{tmp.name}\") as JPEG picture)'")
-            elif os.system == 'Windows':
-                from PIL import Image
-                image = Image.open(tmp.name)
-                output = io.BytesIO()
-                image.convert('RGB').save(output, 'BMP')
-                data = output.getvalue()[14:]
-                output.close()
-                win32clipboard.OpenClipboard()
-                win32clipboard.EmptyClipboard()
-                win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
-                win32clipboard.CloseClipboard()
+            # Copy to clipboard using platform-appropriate command
+            import platform
+            current_platform = platform.system()
+            if current_platform == 'Darwin':  # macOS
+                subprocess.run([
+                    'osascript', '-e',
+                    f'set the clipboard to (read (POSIX file "{tmp.name}") as «class PNGf»)'
+                ], check=False)
+            elif current_platform == 'Windows':
+                try:
+                    from PIL import Image
+                    import io as _io
+                    image = Image.open(tmp.name)
+                    output = _io.BytesIO()
+                    image.convert('RGB').save(output, 'BMP')
+                    bmp_data = output.getvalue()[14:]
+                    output.close()
+                    import win32clipboard
+                    win32clipboard.OpenClipboard()
+                    win32clipboard.EmptyClipboard()
+                    win32clipboard.SetClipboardData(win32clipboard.CF_DIB, bmp_data)
+                    win32clipboard.CloseClipboard()
+                except ImportError:
+                    logger.warning("win32clipboard not available for clipboard copy")
+            else:  # Linux
+                subprocess.run(['xclip', '-selection', 'clipboard', '-t', 'image/png', '-i', tmp.name], check=False)
         
         # Clean up temp file
         os.unlink(tmp.name)
@@ -622,15 +746,27 @@ class AnalysisPanel(ttk.Frame):
         # Determine what data to use based on chart type
         chart_data = self.fleet  # Default to fleet data
         extra_args = {}
-        
+
         # Use specific analysis results for certain chart types
-        if "Electrification" in chart_type and self.electrification_analysis:
+        if chart_type == "Fleet Cash Flow" and self.electrification_analysis:
             chart_data = self.electrification_analysis
+        elif chart_type in ("Replacement Priority", "Scenario Comparison"):
+            chart_data = self.fleet  # Decision charts use fleet vehicles
+        elif chart_type in ("Annual Cost Comparison",):
+            chart_data = self.fleet
             extra_args = {
                 "gas_price": self.gas_price_var.get(),
                 "electricity_price": self.electricity_price_var.get(),
                 "ev_efficiency": self.ev_efficiency_var.get()
             }
+        elif chart_type in ("Electrification Potential", "Emissions Reduction", "ROI Analysis"):
+            if self.electrification_analysis:
+                chart_data = self.electrification_analysis
+                extra_args = {
+                    "gas_price": self.gas_price_var.get(),
+                    "electricity_price": self.electricity_price_var.get(),
+                    "ev_efficiency": self.ev_efficiency_var.get()
+                }
         elif "Emission" in chart_type and self.emissions_inventory:
             chart_data = self.emissions_inventory
         elif "Charging" in chart_type and self.charging_analysis:
@@ -641,11 +777,13 @@ class AnalysisPanel(ttk.Frame):
             # Clear existing figure
             self.current_figure.clear()
             
-            # Create new chart
+            # Create new chart with selected style and color scheme
             ChartFactory.create_chart(
                 chart_type=chart_type,
                 data=chart_data,
                 figure=self.current_figure,
+                chart_style=self.chart_style_var.get(),
+                color_scheme=self.color_scheme_var.get(),
                 **extra_args
             )
             
@@ -773,11 +911,9 @@ class AnalysisPanel(ttk.Frame):
                 # Close progress dialog
                 self.master.after(100, progress.destroy)
         
-        # Start analysis thread
+        # Start analysis thread — UI updates happen via root.after() inside the thread
         threading.Thread(target=analysis_task, daemon=True).start()
-        
-        return self.electrification_analysis
-    
+
     def run_emissions_analysis(self):
         """Run emissions analysis on the current fleet."""
         # Check if we have fleet data
@@ -834,11 +970,9 @@ class AnalysisPanel(ttk.Frame):
                 # Close progress dialog
                 self.master.after(100, progress.destroy)
         
-        # Start analysis thread
+        # Start analysis thread — UI updates happen via root.after() inside the thread
         threading.Thread(target=analysis_task, daemon=True).start()
-        
-        return self.emissions_inventory
-    
+
     def run_charging_analysis(self):
         """Run charging infrastructure analysis on the current fleet."""
         # Check if we have fleet data
@@ -860,18 +994,26 @@ class AnalysisPanel(ttk.Frame):
                 charging_pattern = self.charging_pattern_var.get()
                 charging_window = (self.charging_start_var.get(), self.charging_end_var.get())
                 power_level = self.power_level_var.get()
-                charging_power = self.power_levels[power_level].get()
-                
+                charging_power_kw = self.power_levels[power_level].get()
+
                 # Update progress
                 progress.update(20, "Calculating requirements...")
-                
-                # Run the analysis
+
+                # Run the analysis — map selected power level to the function's
+                # level2/dcfc parameters based on whether it's L2 or DCFC class
+                if power_level in ("LP", "MP"):
+                    l2_rate = charging_power_kw
+                    dcfc_rate = self.power_levels.get("HP", tk.DoubleVar(value=50.0)).get()
+                else:
+                    l2_rate = self.power_levels.get("MP", tk.DoubleVar(value=19.2)).get()
+                    dcfc_rate = charging_power_kw
+
                 self.charging_analysis = analyze_charging_needs(
                     fleet=self.fleet,
                     daily_usage_pattern=charging_pattern,
                     charging_window=charging_window,
-                    charging_power=charging_power,
-                    power_level_type=power_level
+                    level2_charging_rate=l2_rate,
+                    dcfc_charging_rate=dcfc_rate
                 )
                 
                 # Update progress
@@ -907,92 +1049,203 @@ class AnalysisPanel(ttk.Frame):
                 # Close progress dialog
                 self.master.after(100, progress.destroy)
         
-        # Start analysis thread
+        # Start analysis thread — UI updates happen via root.after() inside the thread
         threading.Thread(target=analysis_task, daemon=True).start()
-        
-        return self.charging_analysis
-    
+
+    def run_full_analysis(self):
+        """Run all three analyses sequentially: electrification → emissions → charging."""
+        if not self.fleet or not self.fleet.vehicles:
+            messagebox.showinfo("No Data", "No fleet data available for analysis.")
+            return
+
+        progress = ProgressDialog(
+            self.master,
+            "Running Full Analysis",
+            "Running electrification, emissions, and charging analyses..."
+        )
+
+        def full_task():
+            try:
+                # 1. Electrification
+                progress.update(10, "Running electrification analysis...")
+                self.electrification_analysis = analyze_fleet_electrification(
+                    fleet=self.fleet,
+                    gas_price=self.gas_price_var.get(),
+                    electricity_price=self.electricity_price_var.get(),
+                    ev_efficiency=self.ev_efficiency_var.get(),
+                    analysis_years=self.analysis_years_var.get(),
+                    discount_rate=self.discount_rate_var.get()
+                )
+
+                # 2. Emissions
+                progress.update(45, "Creating emissions inventory...")
+                self.emissions_inventory = create_emissions_inventory(self.fleet)
+
+                # 3. Charging
+                progress.update(70, "Analyzing charging needs...")
+                power_level = self.power_level_var.get()
+                charging_power_kw = self.power_levels[power_level].get()
+                if power_level in ("LP", "MP"):
+                    l2_rate = charging_power_kw
+                    dcfc_rate = self.power_levels.get("HP", tk.DoubleVar(value=50.0)).get()
+                else:
+                    l2_rate = self.power_levels.get("MP", tk.DoubleVar(value=19.2)).get()
+                    dcfc_rate = charging_power_kw
+
+                self.charging_analysis = analyze_charging_needs(
+                    fleet=self.fleet,
+                    daily_usage_pattern=self.charging_pattern_var.get(),
+                    charging_window=(self.charging_start_var.get(), self.charging_end_var.get()),
+                    level2_charging_rate=l2_rate,
+                    dcfc_charging_rate=dcfc_rate
+                )
+
+                progress.update(90, "Updating display...")
+
+                # Update UI on main thread
+                self.master.after(0, self._update_summary)
+                self.master.after(100, lambda: self.current_chart_type.set("Fleet Cash Flow"))
+                self.master.after(200, self._update_chart)
+
+                if self.on_analysis_complete_callback:
+                    self.on_analysis_complete_callback("Full", self.electrification_analysis)
+
+            except Exception as e:
+                logger.error(f"Error in full analysis: {e}")
+                self.master.after(
+                    100,
+                    lambda: messagebox.showerror("Analysis Error",
+                                                 f"Error running full analysis:\n{str(e)}")
+                )
+            finally:
+                self.master.after(100, progress.destroy)
+
+        threading.Thread(target=full_task, daemon=True).start()
+
+    def _navigate_to_present(self):
+        """Navigate to the Present tab in the main notebook."""
+        try:
+            main_window = self.winfo_toplevel()
+            if hasattr(main_window, 'notebook'):
+                # Present tab is index 3 (Process=0, Results=1, Analysis=2, Present=3)
+                main_window.notebook.select(3)
+        except Exception as e:
+            logger.warning(f"Could not navigate to Present tab: {e}")
+
+    def _on_state_selected(self, event=None):
+        """Handle state selection — update gas/electricity prices and show incentives."""
+        selected = self.state_var.get()
+        if not selected or selected == "(National Avg)":
+            self.gas_price_var.set(3.50)
+            self.electricity_price_var.set(0.13)
+            self.incentive_label.config(text="")
+            return
+
+        rates = get_rates_for_state(selected)
+        self.gas_price_var.set(rates["gas_price"])
+        self.electricity_price_var.set(rates["electricity_price"])
+
+        # Show available incentives
+        incentives = get_all_incentives(selected)
+        parts = []
+        if incentives["max_federal"] > 0:
+            parts.append(f"Federal: up to ${incentives['max_federal']:,}")
+        if incentives["max_state"] > 0:
+            names = [i["name"] for i in incentives["state_incentives"]]
+            parts.append(f"State: {', '.join(names)}")
+
+        if parts:
+            self.incentive_label.config(text="Incentives: " + " | ".join(parts))
+        else:
+            self.incentive_label.config(text=f"No state-specific incentives found for {selected}")
+
+    def _export_menu(self):
+        """Show export format selection menu."""
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="PowerPoint Presentation", command=self.export_preliminary_deck)
+        menu.add_command(label="Excel / CSV Report", command=self.export_full_report)
+        menu.add_separator()
+        menu.add_command(label="Current Chart (PNG/PDF/SVG)", command=self.export_current_chart)
+
+        # Position menu near the export button
+        try:
+            menu.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
+        finally:
+            menu.grab_release()
+
     def _update_summary(self):
-        """Update the summary text with current analysis results."""
-        # Clear existing text
-        self.summary_text.config(state=tk.NORMAL)
-        self.summary_text.delete(1.0, tk.END)
-        
-        # Fleet summary
-        self.summary_text.insert(tk.END, "Fleet Summary\n", "heading")
-        self.summary_text.insert(tk.END, "-" * 30 + "\n", "separator")
-        
+        """Update KPI cards and summary text with current analysis results."""
         vehicle_count = len(self.fleet.vehicles) if self.fleet and self.fleet.vehicles else 0
-        self.summary_text.insert(tk.END, f"Total Vehicles: {vehicle_count}\n", "value")
-        
+
+        # ── KPI Cards ──
+        self.kpi_labels["fleet_size"].config(text=str(vehicle_count))
+
         if vehicle_count > 0:
             avg_mpg = self.fleet.avg_mpg
-            self.summary_text.insert(tk.END, f"Average MPG: {avg_mpg:.1f}\n", "value")
-            
-            avg_co2 = self.fleet.avg_co2
-            self.summary_text.insert(tk.END, f"Average CO2: {avg_co2:.1f} g/mile\n", "value")
-            
-            self.summary_text.insert(tk.END, "\n")
-        
-        # Electrification analysis summary
+            self.kpi_labels["avg_mpg"].config(
+                text=f"{avg_mpg:.1f}" if avg_mpg > 0 else "—")
+        else:
+            self.kpi_labels["avg_mpg"].config(text="—")
+
         if self.electrification_analysis:
-            self.summary_text.insert(tk.END, "Electrification Analysis\n", "heading")
-            self.summary_text.insert(tk.END, "-" * 30 + "\n", "separator")
-            
-            self.summary_text.insert(tk.END, f"CO2 Savings: {self.electrification_analysis.co2_savings:.1f} tons\n", "value")
-            
-            fuel_savings = self.electrification_analysis.fuel_cost_savings
-            self.summary_text.insert(tk.END, f"Fuel Savings: ${fuel_savings:,.2f}\n", "value")
-            
             total_savings = self.electrification_analysis.total_savings
-            self.summary_text.insert(tk.END, f"Total Savings: ${total_savings:,.2f}\n", "value")
-            
+            self.kpi_labels["annual_savings"].config(
+                text=f"${total_savings:,.0f}/yr" if total_savings > 0 else "—")
+            co2 = self.electrification_analysis.co2_savings
+            self.kpi_labels["co2_reduction"].config(
+                text=f"{co2:,.1f} MT" if co2 > 0 else "—")
             payback = self.electrification_analysis.payback_period
-            self.summary_text.insert(tk.END, f"Payback Period: {payback:.1f} years\n", "value")
-            
-            self.summary_text.insert(tk.END, "\n")
-        
-        # Emissions inventory summary
-        if self.emissions_inventory:
-            self.summary_text.insert(tk.END, "Emissions Inventory\n", "heading")
-            self.summary_text.insert(tk.END, "-" * 30 + "\n", "separator")
-            
-            total_emissions = self.emissions_inventory.total_emissions
-            self.summary_text.insert(tk.END, f"Total Emissions: {total_emissions:.1f} tons CO2e\n", "value")
-            
-            # Top departments by emissions (up to 3)
-            if self.emissions_inventory.by_department:
-                self.summary_text.insert(tk.END, "Top Departments:\n", "value")
-                
-                top_depts = sorted(
-                    self.emissions_inventory.by_department.items(),
-                    key=lambda x: x[1],
-                    reverse=True
-                )[:3]
-                
-                for dept, emissions in top_depts:
-                    self.summary_text.insert(tk.END, f"- {dept}: {emissions:.1f} tons\n", "value")
-            
-            self.summary_text.insert(tk.END, "\n")
-        
-        # Charging analysis summary
+            self.kpi_labels["payback"].config(
+                text=f"{payback:.1f} yr" if payback > 0 else "—")
+        else:
+            self.kpi_labels["annual_savings"].config(text="—")
+            self.kpi_labels["co2_reduction"].config(text="—")
+            self.kpi_labels["payback"].config(text="—")
+
         if self.charging_analysis:
-            self.summary_text.insert(tk.END, "Charging Analysis\n", "heading")
-            self.summary_text.insert(tk.END, "-" * 30 + "\n", "separator")
-            
-            level2 = self.charging_analysis.level2_chargers_needed
-            self.summary_text.insert(tk.END, f"Level 2 Chargers: {level2}\n", "value")
-            
-            dcfc = self.charging_analysis.dcfc_chargers_needed
-            self.summary_text.insert(tk.END, f"DC Fast Chargers: {dcfc}\n", "value")
-            
-            power = self.charging_analysis.max_power_required
-            self.summary_text.insert(tk.END, f"Max Power: {power:.1f} kW\n", "value")
-            
             cost = self.charging_analysis.estimated_installation_cost
-            self.summary_text.insert(tk.END, f"Est. Cost: ${cost:,.2f}\n", "value")
-        
-        # Make text read-only again
+            self.kpi_labels["infra_cost"].config(
+                text=f"${cost:,.0f}" if cost > 0 else "—")
+        else:
+            self.kpi_labels["infra_cost"].config(text="—")
+
+        # ── Detailed Summary Text ──
+        self.summary_text.config(state=tk.NORMAL)
+        self.summary_text.delete(1.0, tk.END)
+
+        if self.electrification_analysis:
+            ea = self.electrification_analysis
+            self.summary_text.insert(tk.END, "Electrification\n", "heading")
+            self.summary_text.insert(
+                tk.END,
+                f"Fuel savings: ${ea.fuel_cost_savings:,.0f}/yr\n"
+                f"Total savings: ${ea.total_savings:,.0f}/yr\n"
+                f"Payback: {ea.payback_period:.1f} yr\n\n",
+                "value")
+
+        if self.emissions_inventory:
+            ei = self.emissions_inventory
+            self.summary_text.insert(tk.END, "Emissions\n", "heading")
+            self.summary_text.insert(
+                tk.END,
+                f"Total: {ei.total_emissions:.1f} MT CO2e\n",
+                "value")
+            if ei.by_department:
+                top = sorted(ei.by_department.items(), key=lambda x: x[1], reverse=True)[:3]
+                for dept, em in top:
+                    self.summary_text.insert(tk.END, f"  {dept}: {em:.1f} MT\n", "value")
+            self.summary_text.insert(tk.END, "\n")
+
+        if self.charging_analysis:
+            ca = self.charging_analysis
+            self.summary_text.insert(tk.END, "Charging\n", "heading")
+            self.summary_text.insert(
+                tk.END,
+                f"L2: {ca.level2_chargers_needed}  |  DCFC: {ca.dcfc_chargers_needed}\n"
+                f"Peak power: {ca.max_power_required:.0f} kW\n"
+                f"Install cost: ${ca.estimated_installation_cost:,.0f}\n",
+                "value")
+
         self.summary_text.config(state=tk.DISABLED)
     
     def export_full_report(self):
