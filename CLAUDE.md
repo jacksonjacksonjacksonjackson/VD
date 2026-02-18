@@ -589,12 +589,25 @@ Focus: Address the three highest-value remaining polish items — live Excel for
 
 ---
 
-## Known Remaining Polish (Post-Phase 11)
+### Phase 12: Custom Scenario UI, Figure Size Enforcement, Live TCO Anchors
+
+Focus: Address the three highest-value remaining polish items from the post-Phase 11 backlog.
+
+- [x] **9E: Custom scenario definition** — Extended `_create_scenario_section()` in `ui/present_panel.py`. A "Custom Scenario" checkbox row now appears below the 4 presets. Checking it reveals: End Year spinbox (2025–2060, default 2032), Annual Budget Cap entry (0 = unlimited), and an Include combobox (All Vehicles / ACF Regulated Only / Medium+Heavy Only). New `_get_custom_scenario()` constructs an `ElectrificationScenario` object from the UI values. `_export_presentation()` adds `'custom_scenario'` to `export_data`. `_add_scenario_comparison_slide()` in `powerpoint_export.py` reads this key and passes `custom_scenarios=[custom]` to `compare_scenarios()`. No engine changes needed — `ElectrificationScenario` and `compare_scenarios()` in `scenarios.py` already supported custom objects.
+
+- [x] **9F: Figure size enforcement** — `ChartFactory.create_chart()` in `analysis/charts.py` now defaults to `FIG_SIZE_HALF` (10×5.6, true 16:9) instead of the old hardcoded `(8, 6)`. Added `fig_size` kwarg so callers can pass `FIG_SIZE_SLIDE` (13.33×7.5) for full-bleed rendering. All chart methods already accept `figure` as a parameter, so this single change propagates to `FleetCharts`, `ElectrificationCharts`, `EmissionsCharts`, and `DecisionCharts`.
+
+- [x] **9I: Live TCO anchor cells** — `_create_tco_model_sheet()` in `analysis/reports.py` now adds two read-only helper rows to the assumptions block: B15 = avg fleet MPG (computed from vehicles), B16 = avg annual mileage. The 5 anchor cells in columns K–O are now `write_formula()` calls: ICE fuel = `B16/B15*B4*B13`, ICE maint = `B16*B7*B13`, EV fuel = `B16*B6*B5*B13`, EV maint = `B16*B8*B13`, EV infra = `B12*B13`. Changing gas price (B4) or electricity price (B5) now recalculates Year-1 base costs as well as all escalation rows — the model is fully live.
+
+**Phase 12 Status:** Complete. Commit: `d8deb0f`. 163 tests passing. Files modified: `ui/present_panel.py`, `powerpoint_export.py`, `analysis/charts.py`, `analysis/reports.py`.
+
+---
+
+## Known Remaining Polish (Post-Phase 12)
 
 These are minor gaps. None are bugs — the features work correctly. They represent future enhancement opportunities.
 
-1. **9F — Figure size enforcement:** `FIG_SIZE_SLIDE`/`FIG_SIZE_HALF` constants defined but only used by `DecisionCharts`. Older chart methods use caller-provided figure sizes. Cosmetic only.
-2. **9I — Anchor cell editability:** The Year-1 base cost anchor cells (columns K–O in the TCO Model sheet) are written as plain values, not as Excel formulas. If a consultant changes gas price in the assumptions block, the ICE/EV fuel anchors do not update automatically — only the escalation scaling updates. A future enhancement could make the anchors formula-driven from fleet data or a separate vehicle table.
-3. **9E — Custom scenario definition:** The scenario selector allows choosing among the 4 presets but not defining a custom scenario (different end year, budget cap, vehicle filter). Future UI could add a "Custom Scenario" row with editable end_year and budget_per_year fields.
-4. **Rec #12 — Module-level side effects:** `settings.py` creates directories on import (lines 34-35). `utils.py` calls `setup_logging()` at module level (line 66). Moving these to explicit init functions called from `app.py` would be cleaner for testing and tooling.
-5. **Rec #13 — Packaging:** No `pyproject.toml`. App uses `sys.path.insert` hacks. Low priority.
+1. **9I — Anchor cell editability (partial):** B15 (avg fleet MPG) and B16 (avg annual mileage) are read-only plain values — they don't update if the consultant edits fleet size (B13). This is acceptable: MPG and mileage are fleet properties, not assumption inputs. A future enhancement could make them formula-driven from a separate vehicle table embedded in the sheet.
+2. **9E — Custom scenario weights:** The custom scenario exposes end year, budget cap, and vehicle filter, but not `custom_weights` (the per-factor scoring weights used by `_score_vehicle()`). A future power-user UI could allow weight overrides.
+3. **Rec #12 — Module-level side effects:** `settings.py` creates directories on import (lines 34-35). `utils.py` calls `setup_logging()` at module level (line 66). Moving these to explicit init functions called from `app.py` would be cleaner for testing and tooling.
+4. **Rec #13 — Packaging:** No `pyproject.toml`. App uses `sys.path.insert` hacks. Low priority.
