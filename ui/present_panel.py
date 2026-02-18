@@ -63,6 +63,7 @@ class PresentPanel:
         self._create_vehicle_filter_section()
         self._create_preset_section()
         self._create_customization_section()
+        self._create_scenario_section()
         self._create_template_section()
         self._create_preview_section()
         self._create_export_section()
@@ -348,6 +349,92 @@ class PresentPanel:
         )
         self.validation_label.pack(side=tk.LEFT, padx=(10, 0))
     
+    def _create_scenario_section(self):
+        """Create scenario selector for the Scenario Comparison slide.
+
+        Only visible when the 'scenario_comparison' slide is in the selected slides.
+        Lets consultants choose which of the 4 preset scenarios to include.
+        """
+        self._scenario_section_frame = ttk.LabelFrame(
+            self.main_frame,
+            text="Scenario Comparison — Select Scenarios to Include",
+            padding=10
+        )
+        self._scenario_section_frame.pack(fill=tk.X, pady=(0, 15))
+
+        hint = ttk.Label(
+            self._scenario_section_frame,
+            text="Choose which electrification scenarios appear on the Scenario Comparison slide.\n"
+                 "At least one scenario must be selected. (Only applies when that slide is included.)",
+            font=("Segoe UI", 9),
+            foreground="#555555",
+            justify=tk.LEFT,
+            wraplength=600,
+        )
+        hint.pack(anchor=tk.W, pady=(0, 8))
+
+        # Scenario definitions: (display_name, scenario_key, description)
+        SCENARIO_DEFS = [
+            ("Aggressive (2030)",      "aggressive",      "Replace all eligible vehicles by 2030 — maximum speed"),
+            ("Moderate (2035)",        "moderate",        "Balanced timeline, most fleets use this as their baseline"),
+            ("Conservative (2040)",    "conservative",    "Gradual transition — minimises annual budget impact"),
+            ("ACF Compliance Only",    "acf_compliance",  "Targets only CARB-regulated vehicles; ignores light-duty"),
+        ]
+
+        self._scenario_vars: dict = {}
+        checkboxes_frame = ttk.Frame(self._scenario_section_frame)
+        checkboxes_frame.pack(fill=tk.X)
+
+        for key, (display_name, scenario_key, description) in enumerate(SCENARIO_DEFS):
+            row_frame = ttk.Frame(checkboxes_frame)
+            row_frame.pack(fill=tk.X, pady=2)
+
+            var = tk.BooleanVar(value=True)  # all selected by default
+            self._scenario_vars[scenario_key] = var
+
+            cb = ttk.Checkbutton(
+                row_frame,
+                text=display_name,
+                variable=var,
+                command=self._on_scenario_selection_changed,
+                width=22,
+            )
+            cb.pack(side=tk.LEFT)
+
+            desc_lbl = ttk.Label(
+                row_frame,
+                text=f"— {description}",
+                font=("Segoe UI", 9),
+                foreground="#666666",
+            )
+            desc_lbl.pack(side=tk.LEFT, padx=(5, 0))
+
+        # Validation label
+        self._scenario_validation_label = ttk.Label(
+            self._scenario_section_frame,
+            text="",
+            font=("Segoe UI", 9),
+            foreground="#CC3300",
+        )
+        self._scenario_validation_label.pack(anchor=tk.W, pady=(6, 0))
+
+    def _on_scenario_selection_changed(self):
+        """Validate that at least one scenario is selected."""
+        selected = [k for k, v in self._scenario_vars.items() if v.get()]
+        if not selected:
+            self._scenario_validation_label.configure(
+                text="⚠ At least one scenario must be selected."
+            )
+        else:
+            self._scenario_validation_label.configure(text="")
+
+    def _get_selected_scenarios(self) -> list:
+        """Return list of selected scenario keys; falls back to all if none checked."""
+        selected = [k for k, v in self._scenario_vars.items() if v.get()]
+        if not selected:
+            return ["aggressive", "moderate", "conservative", "acf_compliance"]
+        return selected
+
     def _create_template_section(self):
         """Create the template selection section."""
         template_frame = ttk.LabelFrame(self.main_frame, text="Presentation Template", padding=10)
@@ -828,6 +915,7 @@ class PresentPanel:
                 'client_name': client_name,
                 'stage': stage,
                 'subtitle': subtitle if subtitle else f"{stage} Fleet Electrification Analysis",
+                'selected_scenarios': self._get_selected_scenarios(),
             }
 
             # Start export in background thread

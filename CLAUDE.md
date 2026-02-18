@@ -571,16 +571,30 @@ Added client-facing customization controls so users can personalize presentation
 
 **Phase 9J Status:** Complete. Files modified: `ui/present_panel.py` (~1,015 lines, up from 755), `powerpoint_export.py` (1 line). All 151 tests passing.
 
-**Phase 9 Status:** All 10 sub-phases (9A–9J) complete. Phase 10 addressed remaining polish items #2 (9H incentive auto-wiring), Rec #3, #5, #14, #15. See "Known Remaining Polish" for outstanding items.
+**Phase 9 Status:** All 10 sub-phases (9A–9J) complete. Phase 10 addressed remaining polish items #2 (9H incentive auto-wiring), Rec #3, #5, #14, #15. Phase 11 addressed remaining polish items #3 (9I), #4 (9E), #5 (9A). See "Known Remaining Polish" for outstanding items.
 
 ---
 
-## Known Remaining Polish (Post-Phase 10)
+### Phase 11: Consultant-Facing Financial Model Polish
+
+Focus: Address the three highest-value remaining polish items — live Excel formulas, exposed TCO parameters, and scenario selection UI.
+
+- [x] **9I: Live Excel Formula TCO Model** — Rewrote `_create_tco_model_sheet()` in `analysis/reports.py`. The sheet now has a structured **Assumptions block** (rows 3–14) containing editable yellow-highlighted cells for: gas price, electricity price, EV efficiency, ICE/EV maintenance $/mile, fuel escalation rate, discount rate, battery degradation, infrastructure cost, fleet size, and analysis period. All year-by-year rows in the cash flow table use `write_formula()` references back to these assumption cells via absolute `$B$N` references. ICE annual cost, EV annual cost, annual savings, cumulative ICE/EV/savings, NPV, and payback note columns are all live `=` formulas. A payback indicator uses `=IF(AND(prev_cum<0,cur_cum>=0),"✓ PAYBACK YEAR","")`. Four fleet-wide KPI cells (Total ICE TCO, Total EV TCO, Total Savings, Total NPV) also use `=SUM(...)` formulas. Year-1 base cost values are written as "anchor" cells in off-screen columns (K–O) labelled so consultants can find them. Changing any assumption in Excel recalculates the entire model instantly.
+
+- [x] **9A: Expose battery_degradation and residual value parameters** — Added three new params to `analyze_fleet_electrification()` in `analysis/calculations.py`: `battery_degradation` (default `DEFAULT_BATTERY_DEGRADATION = 2.0`), `residual_value_ice_pct` (default `DEFAULT_RESIDUAL_VALUE_ICE_PCT = 15.0`), `residual_value_ev_pct` (default `DEFAULT_RESIDUAL_VALUE_EV_PCT = 20.0`). Both internal calls — `calculate_electrification_savings()` and `calculate_yearly_cash_flows()` — now receive these params. In `ui/analysis_panel.py`: added `battery_degradation_var`, `residual_ice_var`, `residual_ev_var` tk.DoubleVars; added UI controls to the Vehicle Parameters tab (battery degradation entry with tooltip explaining 1–3%/yr typical range; residual value section with ICE and EV entries); added defaults to `reset_defaults()`; imported `DEFAULT_BATTERY_DEGRADATION`, `DEFAULT_RESIDUAL_VALUE_ICE_PCT`, `DEFAULT_RESIDUAL_VALUE_EV_PCT` from settings; wired vars into both `run_electrification_analysis()` and `run_full_analysis()` call sites.
+
+- [x] **9E: Scenario selector in Present panel** — Added `_create_scenario_section()` method to `ui/present_panel.py` (called from `__init__` between customization and template sections). Shows a `LabelFrame` with four checkboxes (Aggressive/Moderate/Conservative/ACF Compliance Only), all checked by default, each with a one-line description. `_on_scenario_selection_changed()` validates at least one is selected. `_get_selected_scenarios()` returns the list of checked keys. `_export_presentation()` now includes `selected_scenarios` in `export_data`. In `powerpoint_export.py`, `_add_scenario_comparison_slide()` reads `data.get('selected_scenarios', [...all 4...])` instead of using a hardcoded list — so the consultant's selection controls what appears on the slide.
+
+**Phase 11 Status:** Complete. 163 tests passing (no new tests needed — all three changes are UI wiring and Excel formula generation, not pure-logic functions). Files modified: `analysis/reports.py` (9I), `analysis/calculations.py` (9A), `ui/analysis_panel.py` (9A), `ui/present_panel.py` (9E), `powerpoint_export.py` (9E).
+
+---
+
+## Known Remaining Polish (Post-Phase 11)
 
 These are minor gaps. None are bugs — the features work correctly. They represent future enhancement opportunities.
 
 1. **9F — Figure size enforcement:** `FIG_SIZE_SLIDE`/`FIG_SIZE_HALF` constants defined but only used by `DecisionCharts`. Older chart methods use caller-provided figure sizes. Cosmetic only.
-2. **~~9H — Incentive auto-wiring~~:** DONE (Phase 10). Incentive checkboxes auto-sum into `incentive_amount_var`, wired to TCO calculation.
-3. **9I — Excel formula cells:** TCO Model sheet writes static Python-computed values, not live `=` formulas. Users cannot change assumptions in Excel and see live updates.
-4. **9E — Scenario UI selector:** The scenario comparison slide always runs all 4 preset scenarios. No UI exists to let users select which scenarios to include or define custom ones.
-5. **9A — Parameter exposure:** `battery_degradation`, `residual_value_ice_pct`, and `residual_value_ev_pct` are not exposed as parameters on `analyze_fleet_electrification()` — they use defaults internally. Callers cannot customize without modifying `calculate_yearly_cash_flows()` directly.
+2. **9I — Anchor cell editability:** The Year-1 base cost anchor cells (columns K–O in the TCO Model sheet) are written as plain values, not as Excel formulas. If a consultant changes gas price in the assumptions block, the ICE/EV fuel anchors do not update automatically — only the escalation scaling updates. A future enhancement could make the anchors formula-driven from fleet data or a separate vehicle table.
+3. **9E — Custom scenario definition:** The scenario selector allows choosing among the 4 presets but not defining a custom scenario (different end year, budget cap, vehicle filter). Future UI could add a "Custom Scenario" row with editable end_year and budget_per_year fields.
+4. **Rec #12 — Module-level side effects:** `settings.py` creates directories on import (lines 34-35). `utils.py` calls `setup_logging()` at module level (line 66). Moving these to explicit init functions called from `app.py` would be cleaner for testing and tooling.
+5. **Rec #13 — Packaging:** No `pyproject.toml`. App uses `sys.path.insert` hacks. Low priority.

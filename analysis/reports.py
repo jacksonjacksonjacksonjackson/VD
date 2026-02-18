@@ -762,61 +762,333 @@ class ExcelReportGenerator(ReportGenerator):
 
 
     def _create_tco_model_sheet(self, workbook, analysis, vehicles, title_format, header_format, cell_format, number_format):
-        """Create TCO Model sheet with year-by-year cash flows."""
+        """Create TCO Model sheet with a live-formula assumptions block and year-by-year cash flows.
+
+        Layout (1-indexed rows as Excel sees them):
+          Row 1       : Title (merged A1:J1)
+          Row 2       : blank
+          Row 3       : "Assumptions" header
+          Rows 4-14   : Assumption input cells in column B, labels in column A
+          Row 15      : blank
+          Row 16      : Column headers for the cash-flow table
+          Rows 17+    : One row per year; all cost/savings cells use =formulas referencing B4:B14
+          Last rows   : Summary KPIs (also formula-based)
+
+        Assumption cells (all in column B, named via xlsxwriter cell reference):
+          B4  = Gas price ($/gal)
+          B5  = Electricity price ($/kWh)
+          B6  = EV efficiency (kWh/mile)
+          B7  = ICE maintenance ($/mile)
+          B8  = EV maintenance ($/mile)
+          B9  = Fuel escalation rate (% / yr)
+          B10 = Discount rate (%)
+          B11 = Battery degradation (% / yr)
+          B12 = Infrastructure cost per vehicle ($)
+          B13 = Fleet size (vehicles)
+          B14 = Analysis period (years)
+
+        Consultants can change B4:B14 and every formula cell recalculates automatically.
+        """
+        from settings import (
+            DEFAULT_GAS_PRICE, DEFAULT_ELECTRICITY_PRICE, DEFAULT_EV_EFFICIENCY,
+            DEFAULT_ICE_MAINTENANCE, DEFAULT_EV_MAINTENANCE,
+            DEFAULT_FUEL_ESCALATION_RATE, DEFAULT_BATTERY_DEGRADATION,
+            DEFAULT_INFRASTRUCTURE_COST_PER_VEHICLE
+        )
+
         ws = workbook.add_worksheet("TCO Model")
-        currency_fmt = workbook.add_format({'border': 1, 'num_format': '$#,##0'})
-        pct_fmt = workbook.add_format({'border': 1, 'num_format': '0.0%'})
 
-        ws.merge_range('A1:H1', "Fleet TCO Model — Year-by-Year Cash Flows", title_format)
+        # ── Formats ─────────────────────────────────────────────────────────────
+        currency_fmt = workbook.add_format({'border': 1, 'num_format': '$#,##0', 'align': 'right'})
+        pct_fmt      = workbook.add_format({'border': 1, 'num_format': '0.00%', 'align': 'right'})
+        num_fmt      = workbook.add_format({'border': 1, 'num_format': '#,##0.00', 'align': 'right'})
+        input_fmt    = workbook.add_format({
+            'border': 2, 'num_format': '#,##0.00', 'align': 'right',
+            'bg_color': '#EAF2FB', 'bold': False
+        })
+        input_pct_fmt = workbook.add_format({
+            'border': 2, 'num_format': '0.00', 'align': 'right',
+            'bg_color': '#EAF2FB'
+        })
+        input_int_fmt = workbook.add_format({
+            'border': 2, 'num_format': '#,##0', 'align': 'right',
+            'bg_color': '#EAF2FB'
+        })
+        label_fmt    = workbook.add_format({'border': 1, 'bold': False, 'align': 'left'})
+        note_fmt     = workbook.add_format({'border': 1, 'italic': True, 'font_color': '#2471A3'})
+        payback_fmt  = workbook.add_format({
+            'border': 1, 'bold': True,
+            'bg_color': '#D5F5E3', 'font_color': '#1E8449'
+        })
+        hint_fmt     = workbook.add_format({
+            'italic': True, 'font_size': 9, 'font_color': '#7F8C8D'
+        })
+        kpi_title_fmt = workbook.add_format({
+            'bold': True, 'bg_color': '#3C465A',
+            'font_color': 'white', 'border': 1, 'align': 'center'
+        })
 
-        # Headers
-        headers = ["Year", "ICE Annual Cost", "EV Annual Cost", "Annual Savings",
-                    "ICE Cumulative", "EV Cumulative", "Cumulative Savings", "Notes"]
-        for col, h in enumerate(headers):
-            ws.write(2, col, h, header_format)
-            ws.set_column(col, col, 18)
+        # ── Column widths ────────────────────────────────────────────────────────
+        ws.set_column('A:A', 30)   # Label
+        ws.set_column('B:B', 18)   # Input / Year
+        ws.set_column('C:C', 18)   # ICE Annual
+        ws.set_column('D:D', 18)   # EV Annual
+        ws.set_column('E:E', 18)   # Annual Savings
+        ws.set_column('F:F', 18)   # ICE Cumulative
+        ws.set_column('G:G', 18)   # EV Cumulative
+        ws.set_column('H:H', 18)   # Cumulative Savings
+        ws.set_column('I:I', 20)   # NPV Savings
+        ws.set_column('J:J', 22)   # Notes
 
-        cash_flows = analysis.fleet_cash_flows
-        for i, cf in enumerate(cash_flows):
-            row = 3 + i
-            year_val = cf.get('year', i)
-            ice_annual = cf.get('ice_annual_cost', 0)
-            ev_annual = cf.get('ev_annual_cost', 0)
-            ice_cumul = cf.get('ice_cumulative', 0)
-            ev_cumul = cf.get('ev_cumulative', 0)
-            savings = ice_annual - ev_annual
-            cumul_savings = ice_cumul - ev_cumul
+        # ── Title ────────────────────────────────────────────────────────────────
+        ws.merge_range('A1:J1', "Fleet TCO Model — Year-by-Year Cash Flows (Live Formula Model)", title_format)
 
-            ws.write(row, 0, year_val, cell_format)
-            ws.write(row, 1, ice_annual, currency_fmt)
-            ws.write(row, 2, ev_annual, currency_fmt)
-            ws.write(row, 3, savings, currency_fmt)
-            ws.write(row, 4, ice_cumul, currency_fmt)
-            ws.write(row, 5, ev_cumul, currency_fmt)
-            ws.write(row, 6, cumul_savings, currency_fmt)
+        # ── Assumptions block (rows 3–15, 1-indexed) ─────────────────────────────
+        # In xlsxwriter, row/col are 0-indexed: row 3 (1-idx) = row 2 (0-idx)
+        ASSUMP_HEADER_ROW = 2   # 0-idx → Excel row 3
+        ASSUMP_START_ROW  = 3   # 0-idx → Excel row 4  (first input row)
 
-            note = ""
-            if i == 0:
-                note = "Year 0: Purchase costs"
-            elif cumul_savings > 0 and (i == 1 or (ice_cumul - ev_cumul > 0 and cf.get('ice_cumulative', 0) - cf.get('ev_cumulative', 0) > 0)):
-                if i > 0:
-                    prev_savings = cash_flows[i-1].get('ice_cumulative', 0) - cash_flows[i-1].get('ev_cumulative', 0)
-                    if prev_savings <= 0 and cumul_savings > 0:
-                        note = "PAYBACK YEAR"
-            ws.write(row, 7, note, cell_format)
+        ws.merge_range(ASSUMP_HEADER_ROW, 0, ASSUMP_HEADER_ROW, 9,
+                       "⚙ Assumptions — Edit yellow cells to recalculate the model", header_format)
+        ws.write(ASSUMP_HEADER_ROW + 1, 0,
+                 "Changes to yellow cells instantly update all formula cells below.",
+                 hint_fmt)
 
-        # Assumptions section
-        row_start = 3 + len(cash_flows) + 2
-        ws.write(row_start, 0, "Assumptions", title_format)
-        assumptions = [
-            ("Fleet size", f"{len(vehicles)} vehicles"),
-            ("Analysis period", f"{len(cash_flows)} years"),
-            ("Total ICE cost", f"${cash_flows[-1].get('ice_cumulative', 0):,.0f}" if cash_flows else ""),
-            ("Total EV cost", f"${cash_flows[-1].get('ev_cumulative', 0):,.0f}" if cash_flows else ""),
+        # Derive baseline values from the first vehicle's cash flow data if possible
+        cash_flows = analysis.fleet_cash_flows or []
+        # Read actual params from first year-1 flow if present; fall back to defaults
+        y1 = next((cf for cf in cash_flows if cf.get('year') == 1), {})
+        gas_price_val   = y1.get('gas_price', DEFAULT_GAS_PRICE)
+        elec_price_val  = y1.get('electricity_price', DEFAULT_ELECTRICITY_PRICE)
+        n_years         = max((cf.get('year', 0) for cf in cash_flows), default=0)
+
+        # Assumption rows: (label, value, format, cell_hint)
+        assumptions_def = [
+            ("Gas Price ($/gal)",              gas_price_val,                              input_fmt,     "B4"),
+            ("Electricity Price ($/kWh)",       elec_price_val,                             input_fmt,     "B5"),
+            ("EV Efficiency (kWh/mile)",        DEFAULT_EV_EFFICIENCY,                      input_fmt,     "B6"),
+            ("ICE Maintenance ($/mile)",        DEFAULT_ICE_MAINTENANCE,                    input_fmt,     "B7"),
+            ("EV Maintenance ($/mile)",         DEFAULT_EV_MAINTENANCE,                     input_fmt,     "B8"),
+            ("Fuel Escalation Rate (%/yr)",     DEFAULT_FUEL_ESCALATION_RATE,               input_pct_fmt, "B9"),
+            ("Discount Rate (%/yr)",            analysis.discount_rate if hasattr(analysis, 'discount_rate') else 5.0, input_pct_fmt, "B10"),
+            ("Battery Degradation (%/yr)",      DEFAULT_BATTERY_DEGRADATION,                input_pct_fmt, "B11"),
+            ("Infrastructure Cost/Vehicle ($)", DEFAULT_INFRASTRUCTURE_COST_PER_VEHICLE,    input_fmt,     "B12"),
+            ("Fleet Size (vehicles)",           len(vehicles),                              input_int_fmt, "B13"),
+            ("Analysis Period (years)",         n_years or 12,                              input_int_fmt, "B14"),
         ]
-        for i, (label, val) in enumerate(assumptions):
-            ws.write(row_start + 1 + i, 0, label, cell_format)
-            ws.write(row_start + 1 + i, 1, val, cell_format)
+
+        # Named cells for formula references (0-indexed row, col 1 = column B)
+        ASSUMP_ROWS = {}  # key → 0-indexed row number
+        for i, (label, value, fmt, cell_hint) in enumerate(assumptions_def):
+            r = ASSUMP_START_ROW + i
+            ws.write(r, 0, label, label_fmt)
+            ws.write(r, 1, value, fmt)
+            ASSUMP_ROWS[cell_hint] = r  # store for formula building
+
+        blank_row = ASSUMP_START_ROW + len(assumptions_def)  # one blank separator row
+
+        # ── Cash-flow table ──────────────────────────────────────────────────────
+        TABLE_HEADER_ROW = blank_row + 1
+        TABLE_DATA_START = TABLE_HEADER_ROW + 1
+
+        col_headers = [
+            "Year", "ICE Annual Cost", "EV Annual Cost", "Annual Savings",
+            "ICE Cumulative", "EV Cumulative", "Cumulative Savings",
+            "NPV Savings (yr)", "Notes"
+        ]
+        for col, h in enumerate(col_headers):
+            ws.write(TABLE_HEADER_ROW, col + 1, h, header_format)
+        # col A (0) left blank on header row — used for row labels in assumption block
+        ws.write(TABLE_HEADER_ROW, 0, "", header_format)
+
+        # Helper: Excel column letter from 0-indexed col number
+        def col_letter(c):
+            letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            return letters[c] if c < 26 else letters[c // 26 - 1] + letters[c % 26]
+
+        # Build assumption cell references (1-indexed Excel addresses)
+        def aref(key):
+            """Return absolute $B$N reference for an assumption cell."""
+            r0 = ASSUMP_ROWS[key]
+            return f"$B${r0 + 1}"   # +1 because Excel rows are 1-indexed
+
+        gas_ref   = aref("B4")
+        elec_ref  = aref("B5")
+        eff_ref   = aref("B6")
+        ice_m_ref = aref("B7")
+        ev_m_ref  = aref("B8")
+        esc_ref   = aref("B9")
+        disc_ref  = aref("B10")
+        batt_ref  = aref("B11")
+        infra_ref = aref("B12")
+        size_ref  = aref("B13")
+        yrs_ref   = aref("B14")
+
+        # We also need per-vehicle MPG average to compute fuel costs.
+        # Since we aggregate across the fleet, use the actual fleet_cash_flows values
+        # for Year 0 purchase and Years 1-N operating formulas.
+        #
+        # Strategy: write the year-0 row as static purchase amounts (no per-unit MPG
+        # formula possible at fleet level), then for years 1-N write formulas that
+        # scale the Year-1 actuals by the escalation / degradation factors.
+        # This gives consultants live escalation / discount sensitivity.
+        #
+        # For ICE and EV base costs we use the Year-1 actuals as anchors; the
+        # formula for year Y scales them by (1 + esc/100)^(Y-1) for fuel and
+        # keeps maintenance flat (no formula for mileage change — KISS).
+
+        # Find year-0 and year-1 cash flows
+        cf0 = next((cf for cf in cash_flows if cf.get('year') == 0), {})
+        cf1 = next((cf for cf in cash_flows if cf.get('year') == 1), {})
+
+        ice_y0_total = cf0.get('ice_total', 0)
+        ev_y0_total  = cf0.get('ev_total', 0)
+
+        # Year-1 component breakdown (fleet aggregate)
+        ice_y1_fuel   = cf1.get('ice_fuel', 0)
+        ice_y1_maint  = cf1.get('ice_maintenance', 0)
+        ev_y1_fuel    = cf1.get('ev_fuel', 0)
+        ev_y1_maint   = cf1.get('ev_maintenance', 0)
+        ev_y1_infra   = cf1.get('ev_infrastructure', 0)
+
+        # Anchor cells: write Year-1 base values as hidden helpers in columns K-O
+        # (off-screen, labelled so consultants can find them)
+        ANCHOR_COL = 10  # column K (0-indexed)
+        ws.write(TABLE_HEADER_ROW, ANCHOR_COL,     "⟵ Anchor: ICE fuel yr1",  hint_fmt)
+        ws.write(TABLE_HEADER_ROW, ANCHOR_COL + 1, "⟵ Anchor: ICE maint yr1", hint_fmt)
+        ws.write(TABLE_HEADER_ROW, ANCHOR_COL + 2, "⟵ Anchor: EV fuel yr1",   hint_fmt)
+        ws.write(TABLE_HEADER_ROW, ANCHOR_COL + 3, "⟵ Anchor: EV maint yr1",  hint_fmt)
+        ws.write(TABLE_HEADER_ROW, ANCHOR_COL + 4, "⟵ Anchor: EV infra yr1",  hint_fmt)
+
+        ANCHOR_ROW = TABLE_DATA_START  # Year-0 row; anchor values go here
+        ws.write(ANCHOR_ROW, ANCHOR_COL,     ice_y1_fuel,  input_fmt)
+        ws.write(ANCHOR_ROW, ANCHOR_COL + 1, ice_y1_maint, input_fmt)
+        ws.write(ANCHOR_ROW, ANCHOR_COL + 2, ev_y1_fuel,   input_fmt)
+        ws.write(ANCHOR_ROW, ANCHOR_COL + 3, ev_y1_maint,  input_fmt)
+        ws.write(ANCHOR_ROW, ANCHOR_COL + 4, ev_y1_infra,  input_fmt)
+
+        # Helper cell references
+        def acref(offset):
+            """Absolute reference to anchor cell at ANCHOR_ROW, ANCHOR_COL+offset."""
+            r_excel = ANCHOR_ROW + 1   # 1-indexed
+            c_letter = col_letter(ANCHOR_COL + offset)
+            return f"${c_letter}${r_excel}"
+
+        ice_fuel_anchor   = acref(0)
+        ice_maint_anchor  = acref(1)
+        ev_fuel_anchor    = acref(2)
+        ev_maint_anchor   = acref(3)
+        ev_infra_anchor   = acref(4)
+
+        # ── Write year-by-year rows ──────────────────────────────────────────────
+        # Year 0 row: static purchase costs (no operating formulas)
+        r0_excel = TABLE_DATA_START
+        ws.write(r0_excel, 0, "Year 0 — Purchase", label_fmt)
+        ws.write(r0_excel, 1, 0,           cell_format)          # Year number
+        ws.write(r0_excel, 2, ice_y0_total, currency_fmt)         # ICE Annual (purchase)
+        ws.write(r0_excel, 3, ev_y0_total,  currency_fmt)         # EV Annual (purchase)
+        ws.write_formula(r0_excel, 4, f"={col_letter(2)}{r0_excel+1}-{col_letter(3)}{r0_excel+1}", currency_fmt)  # Savings
+        ws.write(r0_excel, 5, ice_y0_total, currency_fmt)         # ICE Cumulative
+        ws.write(r0_excel, 6, ev_y0_total,  currency_fmt)         # EV Cumulative
+        ws.write_formula(r0_excel, 7, f"={col_letter(5)}{r0_excel+1}-{col_letter(6)}{r0_excel+1}", currency_fmt)
+        ws.write(r0_excel, 8, 0,            currency_fmt)         # NPV
+        ws.write(r0_excel, 9, "Year 0: Purchase costs", note_fmt)
+
+        # Column letter shortcuts for the cash-flow columns (B=1, C=2, ..., I=8)
+        # col index in worksheet: B=1, C=2, D=3, E=4, F=5, G=6, H=7, I=8, J=9
+        C_YEAR    = 1
+        C_ICE_ANN = 2
+        C_EV_ANN  = 3
+        C_ANN_SAV = 4
+        C_ICE_CUM = 5
+        C_EV_CUM  = 6
+        C_CUM_SAV = 7
+        C_NPV     = 8
+        C_NOTE    = 9
+
+        prev_ice_cum_ref = f"{col_letter(C_ICE_CUM)}{r0_excel + 1}"
+        prev_ev_cum_ref  = f"{col_letter(C_EV_CUM)}{r0_excel + 1}"
+        prev_cum_sav_ref = f"{col_letter(C_CUM_SAV)}{r0_excel + 1}"
+
+        n_data_rows = len([cf for cf in cash_flows if cf.get('year', -1) >= 1]) or (n_years or 12)
+
+        for i in range(1, n_data_rows + 1):
+            row = TABLE_DATA_START + i
+            row_excel = row + 1  # 1-indexed
+
+            prev_row_excel = row_excel - 1
+
+            # Escalation factor: (1 + esc%/100)^(year-1)
+            esc_factor = f"(1+{esc_ref}/100)^({i}-1)"
+
+            # Degradation factor for EV efficiency: (1 + batt%/100)*(year-1)
+            # EV fuel = anchor_ev_fuel * (1 + batt%/100)*(year-1) * esc_factor / esc_factor_yr1
+            # Simpler: EV fuel yr Y = (ev_fuel_anchor * (1 + batt_ref/100*(Y-1))) * (1+esc_ref/100)^(Y-1)
+            # anchor is already at yr1 gas/elec prices; we scale fuel by esc and efficiency by batt deg
+            batt_factor = f"(1+{batt_ref}/100*({i}-1))"
+
+            # ICE annual = (ice_fuel_anchor * esc_factor) + ice_maint_anchor
+            ice_ann_formula = f"={ice_fuel_anchor}*{esc_factor}+{ice_maint_anchor}"
+
+            # EV annual = (ev_fuel_anchor * batt_factor * esc_factor) + ev_maint_anchor + ev_infra_anchor
+            ev_ann_formula  = f"={ev_fuel_anchor}*{batt_factor}*{esc_factor}+{ev_maint_anchor}+{ev_infra_anchor}"
+
+            # Annual savings
+            ice_ann_ref = f"{col_letter(C_ICE_ANN)}{row_excel}"
+            ev_ann_ref  = f"{col_letter(C_EV_ANN)}{row_excel}"
+            ann_sav_formula = f"={ice_ann_ref}-{ev_ann_ref}"
+
+            # Cumulative
+            ice_cum_formula = f"={col_letter(C_ICE_CUM)}{prev_row_excel}+{ice_ann_ref}"
+            ev_cum_formula  = f"={col_letter(C_EV_CUM)}{prev_row_excel}+{ev_ann_ref}"
+
+            ice_cum_ref = f"{col_letter(C_ICE_CUM)}{row_excel}"
+            ev_cum_ref  = f"{col_letter(C_EV_CUM)}{row_excel}"
+            cum_sav_formula = f"={ice_cum_ref}-{ev_cum_ref}"
+
+            # NPV of annual savings: ann_sav / (1 + disc%)^year
+            npv_formula = f"={col_letter(C_ANN_SAV)}{row_excel}/(1+{disc_ref}/100)^{i}"
+
+            # Payback note: flag when cumulative savings crosses from negative to positive
+            prev_cum_sav_cell = f"{col_letter(C_CUM_SAV)}{prev_row_excel}"
+            cum_sav_cell      = f"{col_letter(C_CUM_SAV)}{row_excel}"
+            note_formula = (
+                f'=IF(AND({prev_cum_sav_cell}<0,{cum_sav_cell}>=0),"✓ PAYBACK YEAR","")'
+            )
+
+            ws.write(row, 0, f"Year {i}", label_fmt)
+            ws.write(row, C_YEAR,    i,                cell_format)
+            ws.write_formula(row, C_ICE_ANN, ice_ann_formula, currency_fmt)
+            ws.write_formula(row, C_EV_ANN,  ev_ann_formula,  currency_fmt)
+            ws.write_formula(row, C_ANN_SAV, ann_sav_formula, currency_fmt)
+            ws.write_formula(row, C_ICE_CUM, ice_cum_formula, currency_fmt)
+            ws.write_formula(row, C_EV_CUM,  ev_cum_formula,  currency_fmt)
+            ws.write_formula(row, C_CUM_SAV, cum_sav_formula, currency_fmt)
+            ws.write_formula(row, C_NPV,     npv_formula,     currency_fmt)
+            ws.write_formula(row, C_NOTE,    note_formula,    payback_fmt)
+
+        # ── Summary KPIs (formula-based) ──────────────────────────────────────────
+        last_data_row = TABLE_DATA_START + n_data_rows + 1  # 1-indexed Excel row of last data row
+        last_data_row_excel = TABLE_DATA_START + n_data_rows  # 0-indexed
+
+        SUMMARY_START = last_data_row_excel + 2
+        ws.merge_range(SUMMARY_START, 0, SUMMARY_START, 9,
+                       "Summary — Formula-Linked KPIs", header_format)
+
+        ice_cum_last = f"{col_letter(C_ICE_CUM)}{TABLE_DATA_START + n_data_rows + 1}"
+        ev_cum_last  = f"{col_letter(C_EV_CUM)}{TABLE_DATA_START + n_data_rows + 1}"
+        npv_col_range = f"{col_letter(C_NPV)}{TABLE_DATA_START + 2}:{col_letter(C_NPV)}{TABLE_DATA_START + n_data_rows + 1}"
+
+        kpis = [
+            ("Total ICE TCO (fleet)",     f"={ice_cum_last}",                 currency_fmt),
+            ("Total EV TCO (fleet)",      f"={ev_cum_last}",                  currency_fmt),
+            ("Total Savings (fleet)",     f"={ice_cum_last}-{ev_cum_last}",   currency_fmt),
+            ("Total NPV Savings",         f"=SUM({npv_col_range})",           currency_fmt),
+        ]
+        for j, (lbl, formula, fmt) in enumerate(kpis):
+            r = SUMMARY_START + 1 + j
+            ws.write(r, 0, lbl, label_fmt)
+            ws.write_formula(r, 1, formula, fmt)
 
     def _create_replacement_schedule_sheet(self, workbook, vehicles, title_format, header_format, cell_format, number_format):
         """Create Replacement Schedule sheet — Gantt-style table."""

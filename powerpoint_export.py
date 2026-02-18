@@ -1292,10 +1292,14 @@ def _add_scenario_comparison_slide(prs: Presentation, data: dict) -> bool:
 
         from analysis.scenarios import compare_scenarios
 
-        # Run comparison with all presets
+        # Use consultant-selected scenarios from the Present panel, or all 4 presets
+        scenario_names = data.get(
+            'selected_scenarios',
+            ["aggressive", "moderate", "conservative", "acf_compliance"]
+        )
         comparison = compare_scenarios(
             vehicles,
-            scenario_names=["aggressive", "moderate", "conservative", "acf_compliance"]
+            scenario_names=scenario_names
         )
 
         scenario_results = comparison.get("scenarios", [])

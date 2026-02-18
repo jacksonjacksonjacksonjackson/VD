@@ -26,6 +26,9 @@ from settings import (
     DEFAULT_GAS_PRICE,
     DEFAULT_ELECTRICITY_PRICE,
     DEFAULT_EV_EFFICIENCY,
+    DEFAULT_BATTERY_DEGRADATION,
+    DEFAULT_RESIDUAL_VALUE_ICE_PCT,
+    DEFAULT_RESIDUAL_VALUE_EV_PCT,
     CHART_TYPES
 )
 from utils import SimpleTooltip, ProgressDialog, ScrollableFrame
@@ -94,6 +97,10 @@ class AnalysisPanel(ttk.Frame):
         self.analysis_years_var = tk.IntVar(value=10)
         self.discount_rate_var = tk.DoubleVar(value=5.0)
         self.incentive_amount_var = tk.DoubleVar(value=0.0)
+        # Advanced TCO parameters (9A)
+        self.battery_degradation_var = tk.DoubleVar(value=DEFAULT_BATTERY_DEGRADATION)
+        self.residual_ice_var = tk.DoubleVar(value=DEFAULT_RESIDUAL_VALUE_ICE_PCT)
+        self.residual_ev_var = tk.DoubleVar(value=DEFAULT_RESIDUAL_VALUE_EV_PCT)
         # Tracks per-incentive checkbox vars; rebuilt by _on_state_selected
         self._incentive_check_vars: List[Tuple[tk.BooleanVar, float]] = []
         
@@ -241,6 +248,45 @@ class AnalysisPanel(ttk.Frame):
         years_spinbox.pack(side=tk.RIGHT)
         SimpleTooltip(years_label, "Number of years to consider in the analysis")
 
+        # Battery degradation
+        batt_frame = ttk.Frame(vehicle_frame)
+        batt_frame.pack(fill=tk.X, padx=5, pady=2)
+        batt_label = ttk.Label(batt_frame, text="Battery Degradation (%/yr):")
+        batt_label.pack(side=tk.LEFT)
+        batt_entry = ttk.Entry(batt_frame, textvariable=self.battery_degradation_var, width=8)
+        batt_entry.pack(side=tk.RIGHT)
+        SimpleTooltip(batt_label,
+                      "Annual EV battery capacity loss (%).\n"
+                      "Increases EV energy use by this % each year.\n"
+                      "Typical range: 1–3%/yr. Default: 2%/yr.")
+
+        # Residual values section
+        residual_label = ttk.Label(vehicle_frame, text="Residual Values (% of purchase price at end of analysis):",
+                                   font=("", 8), foreground="#555555")
+        residual_label.pack(anchor="w", padx=5, pady=(4, 0))
+
+        ice_res_frame = ttk.Frame(vehicle_frame)
+        ice_res_frame.pack(fill=tk.X, padx=5, pady=2)
+        ice_res_label = ttk.Label(ice_res_frame, text="ICE Residual Value (%):")
+        ice_res_label.pack(side=tk.LEFT)
+        ice_res_entry = ttk.Entry(ice_res_frame, textvariable=self.residual_ice_var, width=8)
+        ice_res_entry.pack(side=tk.RIGHT)
+        SimpleTooltip(ice_res_label,
+                      "Estimated resale value of the ICE vehicle at end of\n"
+                      "analysis period, as % of original purchase price.\n"
+                      "Default: 15%")
+
+        ev_res_frame = ttk.Frame(vehicle_frame)
+        ev_res_frame.pack(fill=tk.X, padx=5, pady=2)
+        ev_res_label = ttk.Label(ev_res_frame, text="EV Residual Value (%):")
+        ev_res_label.pack(side=tk.LEFT)
+        ev_res_entry = ttk.Entry(ev_res_frame, textvariable=self.residual_ev_var, width=8)
+        ev_res_entry.pack(side=tk.RIGHT)
+        SimpleTooltip(ev_res_label,
+                      "Estimated resale value of the EV at end of analysis\n"
+                      "period, as % of original purchase price.\n"
+                      "EV battery retains value. Default: 20%")
+
         # Charging Parameters Tab
         charging_frame = ttk.LabelFrame(params_notebook, text="Charging Parameters")
         params_notebook.add(charging_frame, text="Charging")
@@ -344,6 +390,9 @@ class AnalysisPanel(ttk.Frame):
             self.ev_efficiency_var.set(DEFAULT_EV_EFFICIENCY)
             self.analysis_years_var.set(10)
             self.discount_rate_var.set(5.0)
+            self.battery_degradation_var.set(DEFAULT_BATTERY_DEGRADATION)
+            self.residual_ice_var.set(DEFAULT_RESIDUAL_VALUE_ICE_PCT)
+            self.residual_ev_var.set(DEFAULT_RESIDUAL_VALUE_EV_PCT)
             self.charging_pattern_var.set("standard")
             self.charging_start_var.set(18)
             self.charging_end_var.set(6)
@@ -848,6 +897,9 @@ class AnalysisPanel(ttk.Frame):
                     analysis_years=analysis_years,
                     discount_rate=discount_rate,
                     incentive_amount=self.incentive_amount_var.get(),
+                    battery_degradation=self.battery_degradation_var.get(),
+                    residual_value_ice_pct=self.residual_ice_var.get(),
+                    residual_value_ev_pct=self.residual_ev_var.get(),
                 )
                 
                 # Update progress
@@ -1048,6 +1100,9 @@ class AnalysisPanel(ttk.Frame):
                     analysis_years=self.analysis_years_var.get(),
                     discount_rate=self.discount_rate_var.get(),
                     incentive_amount=self.incentive_amount_var.get(),
+                    battery_degradation=self.battery_degradation_var.get(),
+                    residual_value_ice_pct=self.residual_ice_var.get(),
+                    residual_value_ev_pct=self.residual_ev_var.get(),
                 )
 
                 # 2. Emissions

@@ -494,6 +494,9 @@ def analyze_fleet_electrification(
     fuel_escalation_rate: float = DEFAULT_FUEL_ESCALATION_RATE,
     incentive_amount: float = DEFAULT_INCENTIVE_AMOUNT,
     infrastructure_cost_per_vehicle: float = DEFAULT_INFRASTRUCTURE_COST_PER_VEHICLE,
+    battery_degradation: float = DEFAULT_BATTERY_DEGRADATION,
+    residual_value_ice_pct: float = DEFAULT_RESIDUAL_VALUE_ICE_PCT,
+    residual_value_ev_pct: float = DEFAULT_RESIDUAL_VALUE_EV_PCT,
 ) -> ElectrificationAnalysis:
     """
     Analyze electrification potential for an entire fleet.
@@ -535,6 +538,7 @@ def analyze_fleet_electrification(
             analysis_years=analysis_years,
             discount_rate=discount_rate,
             fuel_escalation_rate=fuel_escalation_rate,
+            battery_degradation=battery_degradation,
         )
 
         # Build per-vehicle result
@@ -570,6 +574,9 @@ def analyze_fleet_electrification(
                 fuel_escalation_rate=fuel_escalation_rate,
                 incentive_amount=incentive_amount,
                 infrastructure_cost_per_vehicle=infrastructure_cost_per_vehicle,
+                battery_degradation=battery_degradation,
+                residual_value_ice_pct=residual_value_ice_pct,
+                residual_value_ev_pct=residual_value_ev_pct,
             )
             vr["cash_flows"] = cf["yearly_flows"]
             vr["cash_flow_summary"] = cf["summary"]
