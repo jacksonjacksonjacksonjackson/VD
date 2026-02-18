@@ -404,7 +404,7 @@ class AnalysisPanel(ttk.Frame):
             style="Secondary.TButton"
         )
         reset_btn.pack(fill=tk.X, padx=Spacing.SM, pady=(0, Spacing.MARGIN_ELEMENT))
-        SimpleTooltip(reset_btn, "Reset all parameters to default values\nGas: $3.50/gal, Electricity: $0.13/kWh, EV Efficiency: 3.0 mi/kWh")
+        SimpleTooltip(reset_btn, "Reset all parameters to default values\nGas: $3.50/gal, Electricity: $0.13/kWh, EV Efficiency: 0.30 kWh/mi")
     
     def _create_analysis_buttons(self):
         """Create analysis action buttons."""
@@ -905,16 +905,14 @@ class AnalysisPanel(ttk.Frame):
                 # Update progress
                 progress.update(80, "Updating display...")
                 
-                # Update the UI
-                self._update_summary()
-                
-                # Set chart to electrification-specific chart
+                # Update the UI — must be marshalled to the main thread
                 electrification_chart = next((c for c in CHART_TYPES if "Electrification" in c), CHART_TYPES[0])
-                self.current_chart_type.set(electrification_chart)
-                
+                self.master.after(0, self._update_summary)
+                self.master.after(0, lambda: self.current_chart_type.set(electrification_chart))
+
                 # Update chart
                 self.master.after(100, self._update_chart)
-                
+
                 # Call completion callback
                 if self.on_analysis_complete_callback:
                     self.on_analysis_complete_callback("Electrification", self.electrification_analysis)
@@ -964,16 +962,14 @@ class AnalysisPanel(ttk.Frame):
                 # Update progress
                 progress.update(80, "Updating display...")
                 
-                # Update the UI
-                self._update_summary()
-                
-                # Set chart to emissions-specific chart
+                # Update the UI — must be marshalled to the main thread
                 emissions_chart = next((c for c in CHART_TYPES if "Emission" in c), CHART_TYPES[0])
-                self.current_chart_type.set(emissions_chart)
-                
+                self.master.after(0, self._update_summary)
+                self.master.after(0, lambda: self.current_chart_type.set(emissions_chart))
+
                 # Update chart
                 self.master.after(100, self._update_chart)
-                
+
                 # Call completion callback
                 if self.on_analysis_complete_callback:
                     self.on_analysis_complete_callback("Emissions", self.emissions_inventory)
@@ -1043,13 +1039,11 @@ class AnalysisPanel(ttk.Frame):
                 # Update progress
                 progress.update(80, "Updating display...")
                 
-                # Update the UI
-                self._update_summary()
-                
-                # Set chart to charging-specific chart
+                # Update the UI — must be marshalled to the main thread
                 charging_chart = next((c for c in CHART_TYPES if "Charging" in c), CHART_TYPES[0])
-                self.current_chart_type.set(charging_chart)
-                
+                self.master.after(0, self._update_summary)
+                self.master.after(0, lambda: self.current_chart_type.set(charging_chart))
+
                 # Update chart
                 self.master.after(100, self._update_chart)
                 
@@ -1339,7 +1333,7 @@ class AnalysisPanel(ttk.Frame):
                 # Update progress
                 progress.update(25, "Preparing data...")
                 
-                # Run any missing analyses
+                # Run any missing analyses, using all user-configured parameters
                 if not self.electrification_analysis:
                     progress.update(40, "Running electrification analysis...")
                     self.electrification_analysis = analyze_fleet_electrification(
@@ -1350,18 +1344,31 @@ class AnalysisPanel(ttk.Frame):
                         analysis_years=self.analysis_years_var.get(),
                         discount_rate=self.discount_rate_var.get(),
                         incentive_amount=self.incentive_amount_var.get(),
+                        battery_degradation=self.battery_degradation_var.get(),
+                        residual_value_ice_pct=self.residual_ice_var.get(),
+                        residual_value_ev_pct=self.residual_ev_var.get(),
                     )
-                
+
                 if not self.emissions_inventory:
                     progress.update(55, "Creating emissions inventory...")
                     self.emissions_inventory = create_emissions_inventory(self.fleet)
-                
+
                 if not self.charging_analysis:
                     progress.update(70, "Analyzing charging needs...")
+                    power_level = self.power_level_var.get()
+                    charging_power_kw = self.power_levels[power_level].get()
+                    if power_level in ("LP", "MP"):
+                        l2_rate = charging_power_kw
+                        dcfc_rate = self.power_levels["HP"].get()
+                    else:
+                        l2_rate = self.power_levels["MP"].get()
+                        dcfc_rate = charging_power_kw
                     self.charging_analysis = analyze_charging_needs(
                         fleet=self.fleet,
                         daily_usage_pattern=self.charging_pattern_var.get(),
-                        charging_window=(self.charging_start_var.get(), self.charging_end_var.get())
+                        charging_window=(self.charging_start_var.get(), self.charging_end_var.get()),
+                        level2_charging_rate=l2_rate,
+                        dcfc_charging_rate=dcfc_rate,
                     )
                 
                 # Update progress

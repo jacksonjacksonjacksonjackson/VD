@@ -603,11 +603,36 @@ Focus: Address the three highest-value remaining polish items from the post-Phas
 
 ---
 
-## Known Remaining Polish (Post-Phase 12)
+## Known Remaining Polish (Post-Phase 13)
 
 These are minor gaps. None are bugs — the features work correctly. They represent future enhancement opportunities.
 
-1. **9I — Anchor cell editability (partial):** B15 (avg fleet MPG) and B16 (avg annual mileage) are read-only plain values — they don't update if the consultant edits fleet size (B13). This is acceptable: MPG and mileage are fleet properties, not assumption inputs. A future enhancement could make them formula-driven from a separate vehicle table embedded in the sheet.
-2. **9E — Custom scenario weights:** The custom scenario exposes end year, budget cap, and vehicle filter, but not `custom_weights` (the per-factor scoring weights used by `_score_vehicle()`). A future power-user UI could allow weight overrides.
-3. **Rec #12 — Module-level side effects:** `settings.py` creates directories on import (lines 34-35). `utils.py` calls `setup_logging()` at module level (line 66). Moving these to explicit init functions called from `app.py` would be cleaner for testing and tooling.
+1. **9I — Excel anchor cell editability (partial):** B15 (avg fleet MPG) and B16 (avg annual mileage) in the TCO Model sheet are plain computed values — they don't update if the consultant edits fleet size (B13). Acceptable since MPG and mileage are fleet properties, not user assumption inputs.
+2. **9E — Custom scenario weight overrides:** The custom scenario UI exposes end year, budget cap, and vehicle filter, but not `custom_weights` (the per-factor scoring weights inside `_score_vehicle()`). A future power-user panel could expose these.
+3. **Rec #12 — Module-level side effects:** `settings.py` creates directories on import (lines 34-35). `utils.py` calls `setup_logging()` at module level (line 66). Moving these to explicit init functions called only from `app.py` would be cleaner for testing/tooling.
 4. **Rec #13 — Packaging:** No `pyproject.toml`. App uses `sys.path.insert` hacks. Low priority.
+5. **#31 — Validation warnings not surfaced in Present panel:** `ui/present_panel.py` `_validate_current_selection()` builds a `warning_text` string but never displays it to the user. Low priority cosmetic gap.
+
+---
+
+### Phase 13: Post-Audit Bug Fixes
+
+Focus: Address all issues surfaced by a fresh codebase audit after Phase 12. Issues ranged from intermittent thread-safety crashes to wrong units in a tooltip.
+
+- [x] **Fix A: Thread-unsafe Tkinter calls in individual analysis methods** — `run_electrification_analysis()`, `run_emissions_analysis()`, and `run_charging_analysis()` called `self._update_summary()` and `self.current_chart_type.set()` directly inside background threads. Caused intermittent `RuntimeError: main thread is not in main loop` on macOS/Linux. Fixed: both calls wrapped in `self.master.after(0, ...)` in all three methods, consistent with how `run_full_analysis()` already did it.
+
+- [x] **Fix B: `export_full_report()` ignores user-configured parameters** — The auto-run of electrification analysis inside `export_full_report()` omitted `battery_degradation`, `residual_value_ice_pct`, `residual_value_ev_pct`; the charging auto-run used library defaults instead of the user's selected power level. Fixed: all user-configured vars now passed at both auto-run sites (matching `run_electrification_analysis()` and `run_charging_analysis()` call signatures).
+
+- [x] **Fix C: EV efficiency tooltip inverts units** — Reset button tooltip said `"EV Efficiency: 3.0 mi/kWh"` but the field is `"EV Efficiency (kWh/mi):"` and default is `0.30 kWh/mi`. Fixed: tooltip now reads `"EV Efficiency: 0.30 kWh/mi"`.
+
+- [x] **Fix D: Payback filter silently included vehicles with unknown payback** — `_get_filtered_vehicles()` included vehicles where `_payback_years is None` (no EV match, no payback computed) when any Max Payback filter was active. Fixed: unknown-payback vehicles are now excluded when a payback threshold is selected (they have not passed the threshold — they are unscored). Confirmed preferred behavior via user question.
+
+- [x] **Fix E: Slide preview hardcoded "4 electrification scenarios compared"** — `_build_slide_context()` always emitted `"4 electrification scenarios compared"` regardless of user selection. Fixed: count now computed dynamically from `_scenario_vars` + `_custom_scenario_var` checkbox state. Pluralization handled (`"1 scenario"` vs `"3 scenarios"`).
+
+- [x] **Fix F: `os.system()` for post-export file open** — `_export_completed()` used `os.system(f'open "{output_path}"')` — shell-invoked, metacharacter-fragile, macOS-only. Fixed: added `import platform` and `import subprocess`; now uses `subprocess.run(['open', output_path])` on macOS, `subprocess.run(['xdg-open', output_path])` on Linux, and `os.startfile()` on Windows (which was already correct).
+
+- [x] **Fix G: Dead `reportlab`/PDF code in `reports.py`** — PDF was removed from `EXPORT_FORMATS` in Phase 5, but `analysis/reports.py` still imported `reportlab` (10 lines) and contained the full ~325-line `PdfReportGenerator` class plus PDF checks in `ReportGeneratorFactory` and `ExportCoordinator`. Fixed: removed `reportlab` try/except import block, replaced `PdfReportGenerator` with a 4-line stub (returns `False` immediately so factory calls don't raise `NameError`), removed the `.pdf` branch from `ReportGeneratorFactory.create_generator()`, removed the `PDF_AVAILABLE` guard from `ExportCoordinator.export_all()`. File reduced from 1,881 to 1,550 lines (~17% smaller). Module docstring updated to reflect CSV/Excel only.
+
+- [x] **Fix H: `APP_VERSION` stale** — `settings.py` `APP_VERSION` was `"3.0.2"`. Bumped to `"3.0.3"` to match branch name and CLAUDE.md header.
+
+**Phase 13 Status:** Complete. 163 tests passing (no new tests needed — all changes are UI wiring, dead code removal, and constant corrections). Files modified: `ui/analysis_panel.py` (Fixes A, B, C), `ui/present_panel.py` (Fixes D, E, F), `analysis/reports.py` (Fix G), `settings.py` (Fix H).

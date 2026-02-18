@@ -6,6 +6,8 @@ Provides UI for customizing and exporting PowerPoint presentations.
 """
 
 import os
+import platform
+import subprocess
 import logging
 import threading
 import tkinter as tk
@@ -224,10 +226,8 @@ class PresentPanel:
                 filtered = []
                 for v in vehicles:
                     pb = getattr(v, 'custom_fields', {}).get('_payback_years')
-                    if pb is None:
-                        filtered.append(v)  # include vehicles without payback data
-                    elif pb < max_years:
-                        filtered.append(v)
+                    if pb is not None and pb < max_years:
+                        filtered.append(v)  # only include vehicles that actually meet the threshold
                 vehicles = filtered
             except (ValueError, IndexError):
                 pass
@@ -943,7 +943,10 @@ class PresentPanel:
         else:
             ctx['executive_recommendations'] = "Top 5 priority replacements"
         ctx['replacement_schedule'] = f"Top 12 vehicles sorted by target year"
-        ctx['scenario_comparison'] = "4 electrification scenarios compared"
+        scenario_count = len([k for k, v in self._scenario_vars.items() if v.get()])
+        if self._custom_scenario_var.get():
+            scenario_count += 1
+        ctx['scenario_comparison'] = f"{scenario_count} electrification scenario{'s' if scenario_count != 1 else ''} compared"
         ctx['age_analysis'] = "Fleet age distribution"
         ctx['data_quality'] = f"{success}/{n} successfully processed"
         ctx['next_steps'] = "Data-driven action items"
@@ -1075,12 +1078,14 @@ class PresentPanel:
                 msg += "\n\nOpening presentation..."
                 messagebox.showinfo("Export Successful", msg)
                 
-                # Try to open the file
+                # Try to open the file with the platform-native viewer
                 try:
                     if os.name == 'nt':  # Windows
                         os.startfile(output_path)
-                    elif os.name == 'posix':  # macOS/Linux
-                        os.system(f'open "{output_path}"')
+                    elif platform.system() == 'Darwin':  # macOS
+                        subprocess.run(['open', output_path], check=False)
+                    else:  # Linux / other POSIX
+                        subprocess.run(['xdg-open', output_path], check=False)
                 except Exception as e:
                     logger.warning(f"Could not open presentation: {e}")
             else:

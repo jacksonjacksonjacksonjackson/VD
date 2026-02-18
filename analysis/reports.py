@@ -2,7 +2,7 @@
 reports.py
 
 Report generation and exports for the Fleet Electrification Analyzer.
-Provides functions to create various report formats (PDF, Excel, etc.).
+Provides functions to create various report formats (CSV, Excel).
 """
 
 import os
@@ -38,16 +38,6 @@ except ImportError:
     EXCEL_AVAILABLE = False
     logger.warning("XlsxWriter not available. Excel export will be disabled.")
 
-try:
-    from reportlab.lib.pagesizes import letter, A4
-    from reportlab.lib import colors
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import inch
-    PDF_AVAILABLE = True
-except ImportError:
-    PDF_AVAILABLE = False
-    logger.warning("ReportLab not available. PDF export will be disabled.")
 
 ###############################################################################
 # Report Generator Base Class
@@ -1311,330 +1301,18 @@ class ExcelReportGenerator(ReportGenerator):
                 row += 1
 
 
+
 ###############################################################################
-# PDF Export
+# PDF Export — REMOVED (Phase 5 Fix 40 / Phase 13 Fix G)
 ###############################################################################
 
 class PdfReportGenerator(ReportGenerator):
-    """Generate PDF reports from fleet data with charts and analysis."""
-    
-    def generate(self, fleet: Union[Fleet, List[FleetVehicle]], 
-               analysis: Optional[ElectrificationAnalysis] = None,
-               charging: Optional[ChargingAnalysis] = None,
-               emissions: Optional[EmissionsInventory] = None,
-               include_charts: bool = True,
-               include_vehicle_table: bool = True) -> bool:
-        """
-        Generate a PDF report with data, charts, and analysis.
-        
-        Args:
-            fleet: Fleet object or list of vehicles
-            analysis: Optional electrification analysis
-            charging: Optional charging analysis
-            emissions: Optional emissions inventory
-            include_charts: Whether to include charts
-            include_vehicle_table: Whether to include the vehicle data table
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        if not PDF_AVAILABLE:
-            logger.error("PDF export is not available (reportlab not installed)")
-            return False
-        
-        try:
-            # Extract vehicles from fleet if needed
-            vehicles = fleet.vehicles if isinstance(fleet, Fleet) else fleet
-            
-            if not vehicles:
-                logger.warning("No vehicles to export")
-                return False
-            
-            # Create PDF document
-            doc = SimpleDocTemplate(
-                self.output_path,
-                pagesize=letter,
-                rightMargin=72,
-                leftMargin=72,
-                topMargin=72,
-                bottomMargin=72
-            )
-            
-            # Get styles
-            styles = getSampleStyleSheet()
-            title_style = styles['Title']
-            heading1_style = styles['Heading1']
-            heading2_style = styles['Heading2']
-            normal_style = styles['Normal']
-            
-            # Create custom paragraph styles
-            subtitle_style = ParagraphStyle(
-                'Subtitle',
-                parent=styles['Heading2'],
-                fontSize=12,
-                spaceAfter=12
-            )
-            
-            table_header_style = ParagraphStyle(
-                'TableHeader',
-                parent=styles['Normal'],
-                fontSize=9,
-                textColor=colors.white,
-                alignment=1  # Center
-            )
-            
-            table_cell_style = ParagraphStyle(
-                'TableCell',
-                parent=styles['Normal'],
-                fontSize=8
-            )
-            
-            # Create story (list of elements to add to the PDF)
-            story = []
-            
-            # Add title
-            fleet_name = fleet.name if isinstance(fleet, Fleet) else "Fleet Analysis"
-            report_date = datetime.datetime.now().strftime("%Y-%m-%d")
-            
-            story.append(Paragraph(f"{fleet_name}", title_style))
-            story.append(Paragraph(f"Fleet Electrification Analysis Report", subtitle_style))
-            story.append(Paragraph(f"Generated on {report_date}", normal_style))
-            story.append(Spacer(1, 12))
-            
-            # Add fleet summary
-            story.append(Paragraph("Fleet Summary", heading1_style))
-            story.append(Spacer(1, 6))
-            
-            # Basic statistics
-            summary_data = [
-                ["Total Vehicles:", f"{len(vehicles)}"],
-                ["Average MPG:", f"{self._calculate_avg_mpg(vehicles):.1f}"],
-                ["Average CO2 Emissions:", f"{self._calculate_avg_co2(vehicles):.1f} g/mile"],
-                ["Average Annual Mileage:", f"{self._calculate_avg_mileage(vehicles):.0f} miles"]
-            ]
-            
-            # Create table for summary stats
-            summary_table = Table(summary_data, colWidths=[2*inch, 1.5*inch])
-            summary_table.setStyle(TableStyle([
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                ('BACKGROUND', (0, 0), (0, -1), colors.lightgrey),
-                ('ALIGN', (1, 0), (1, -1), 'CENTER'),
-            ]))
-            
-            story.append(summary_table)
-            story.append(Spacer(1, 12))
-            
-            # Add charts if requested
-            if include_charts and len(vehicles) > 0:
-                story.append(Paragraph("Fleet Composition", heading2_style))
-                story.append(Spacer(1, 6))
-                
-                # Create and add make frequency chart
-                if self._add_chart_to_story(story, "Make Frequency", vehicles):
-                    story.append(Spacer(1, 12))
-                
-                # Create and add body class distribution chart
-                if self._add_chart_to_story(story, "Body Class Distribution", vehicles):
-                    story.append(Spacer(1, 12))
-                
-                # Create and add fuel type distribution chart
-                if self._add_chart_to_story(story, "Fuel Type Distribution", vehicles):
-                    story.append(Spacer(1, 12))
-                
-                story.append(Paragraph("Fleet Performance", heading2_style))
-                story.append(Spacer(1, 6))
-                
-                # Create and add MPG distribution chart
-                if self._add_chart_to_story(story, "MPG Distribution", vehicles):
-                    story.append(Spacer(1, 12))
-                
-                # Create and add CO2 distribution chart
-                if self._add_chart_to_story(story, "CO2 Emissions Distribution", vehicles):
-                    story.append(Spacer(1, 12))
-                
-                # Create and add CO2 vs MPG chart
-                if self._add_chart_to_story(story, "CO2 vs MPG Correlation", vehicles):
-                    story.append(Spacer(1, 12))
-            
-            # Add electrification analysis if available
-            if analysis:
-                story.append(Paragraph("Electrification Analysis", heading1_style))
-                story.append(Spacer(1, 6))
-                
-                # Add analysis parameters
-                story.append(Paragraph("Analysis Parameters:", heading2_style))
-                
-                params_data = [
-                    ["Gas Price:", f"${analysis.gas_price:.2f}/gal"],
-                    ["Electricity Price:", f"${analysis.electricity_price:.2f}/kWh"],
-                    ["EV Efficiency:", f"{analysis.ev_efficiency:.2f} kWh/mile"],
-                    ["Analysis Period:", f"{analysis.analysis_period} years"],
-                    ["Discount Rate:", f"{analysis.discount_rate:.1f}%"]
-                ]
-                
-                params_table = Table(params_data, colWidths=[2*inch, 1.5*inch])
-                params_table.setStyle(TableStyle([
-                    ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                    ('BACKGROUND', (0, 0), (0, -1), colors.lightgrey),
-                    ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-                ]))
-                
-                story.append(params_table)
-                story.append(Spacer(1, 12))
-                
-                # Add analysis results
-                story.append(Paragraph("Analysis Results:", heading2_style))
-                
-                results_data = [
-                    ["Total CO2 Savings:", f"{analysis.co2_savings:.1f} tons"],
-                    ["Fuel Cost Savings:", f"${analysis.fuel_cost_savings:,.2f}"],
-                    ["Maintenance Savings:", f"${analysis.maintenance_savings:,.2f}"],
-                    ["Total Savings:", f"${analysis.total_savings:,.2f}"],
-                    ["Payback Period:", f"{analysis.payback_period:.1f} years"]
-                ]
-                
-                results_table = Table(results_data, colWidths=[2*inch, 1.5*inch])
-                results_table.setStyle(TableStyle([
-                    ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                    ('BACKGROUND', (0, 0), (0, -1), colors.lightgrey),
-                    ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-                ]))
-                
-                story.append(results_table)
-                story.append(Spacer(1, 12))
-                
-                # Add electrification potential chart
-                if include_charts:
-                    if self._add_chart_to_story(story, "Electrification Potential", analysis):
-                        story.append(Spacer(1, 12))
-            
-            # Add charging analysis if available
-            if charging:
-                story.append(Paragraph("Charging Infrastructure", heading1_style))
-                story.append(Spacer(1, 6))
-                
-                # Add infrastructure requirements
-                infra_data = [
-                    ["Level 2 Chargers:", f"{charging.level2_chargers_needed}"],
-                    ["DC Fast Chargers:", f"{charging.dcfc_chargers_needed}"],
-                    ["Maximum Power Required:", f"{charging.max_power_required:.1f} kW"],
-                    ["Estimated Cost:", f"${charging.estimated_installation_cost:,.2f}"]
-                ]
-                
-                infra_table = Table(infra_data, colWidths=[2*inch, 1.5*inch])
-                infra_table.setStyle(TableStyle([
-                    ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                    ('BACKGROUND', (0, 0), (0, -1), colors.lightgrey),
-                    ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-                ]))
-                
-                story.append(infra_table)
-                story.append(Spacer(1, 12))
-                
-                # Add charging infrastructure chart
-                if include_charts:
-                    if self._add_chart_to_story(story, "Charging Infrastructure", charging):
-                        story.append(Spacer(1, 12))
-            
-            # Add vehicle data table if requested
-            if include_vehicle_table:
-                story.append(Paragraph("Vehicle Data", heading1_style))
-                story.append(Spacer(1, 6))
-                
-                # Get selected fields
-                fields = ["VIN", "Year", "Make", "Model", "MPG Combined", "CO2 emissions", "Annual Mileage"]
-                headers = [COLUMN_NAME_MAP.get(field, field) for field in fields]
-                
-                # Create table data
-                table_data = [headers]  # First row is headers
-                
-                for vehicle in vehicles:
-                    row_dict = vehicle.to_row_dict()
-                    table_data.append([row_dict.get(field, "") for field in fields])
-                
-                # Create table
-                vehicle_table = Table(table_data, repeatRows=1)
-                
-                # Style the table
-                style = TableStyle([
-                    ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue),
-                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-                    ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
-                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                    ('FONTSIZE', (0, 0), (-1, 0), 8),
-                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-                    ('GRID', (0, 0), (-1, -1), 0.25, colors.black),
-                    ('FONTSIZE', (0, 1), (-1, -1), 7),
-                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-                    ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey])
-                ])
-                
-                vehicle_table.setStyle(style)
-                
-                # Add table to story
-                story.append(vehicle_table)
-            
-            # Build the PDF
-            doc.build(story)
-            
-            logger.info(f"PDF report generated successfully: {self.output_path}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error generating PDF report: {e}")
-            return False
-    
-    def _calculate_avg_mpg(self, vehicles):
-        """Calculate average MPG for fleet."""
-        mpg_values = [v.fuel_economy.combined_mpg for v in vehicles 
-                     if v.fuel_economy.combined_mpg and v.fuel_economy.combined_mpg > 0]
-        
-        if not mpg_values:
-            return 0.0
-        
-        return sum(mpg_values) / len(mpg_values)
-    
-    def _calculate_avg_co2(self, vehicles):
-        """Calculate average CO2 emissions for fleet."""
-        co2_values = [v.fuel_economy.co2_primary for v in vehicles 
-                     if v.fuel_economy.co2_primary and v.fuel_economy.co2_primary > 0]
-        
-        if not co2_values:
-            return 0.0
-        
-        return sum(co2_values) / len(co2_values)
-    
-    def _calculate_avg_mileage(self, vehicles):
-        """Calculate average annual mileage for fleet."""
-        mileage_values = [v.annual_mileage for v in vehicles 
-                         if v.annual_mileage and v.annual_mileage > 0]
-        
-        if not mileage_values:
-            return 0.0
-        
-        return sum(mileage_values) / len(mileage_values)
-    
-    def _add_chart_to_story(self, story, chart_type, data):
-        """Add a chart to the PDF story."""
-        try:
-            # Create the chart using matplotlib
-            figure = ChartFactory.create_chart(chart_type, data)
-            
-            # Save chart to a BytesIO object
-            buf = BytesIO()
-            figure.savefig(buf, format='png', dpi=150, bbox_inches='tight')
-            buf.seek(0)
-            
-            # Add chart to story
-            img = Image(buf, width=6*inch, height=4*inch)
-            story.append(img)
-            
-            plt.close(figure)
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error adding chart to PDF: {e}")
-            return False
+    """PDF export removed in Phase 5 (Fix 40). Stub so factory does not raise
+    NameError if called with a .pdf path; always returns False."""
+
+    def generate(self, fleet, **kwargs) -> bool:  # type: ignore[override]
+        logger.error("PDF export is not supported. Only CSV and Excel exports are available.")
+        return False
 
 
 ###############################################################################
@@ -1735,11 +1413,6 @@ class ReportGeneratorFactory:
                 return None
             return ExcelReportGenerator(output_path)
         
-        elif ext == '.pdf':
-            if not PDF_AVAILABLE:
-                logger.error("PDF export is not available (reportlab not installed)")
-                return None
-            return PdfReportGenerator(output_path)
         
         elif ext == '.json':
             return JsonReportGenerator(output_path)
@@ -1857,10 +1530,6 @@ class ExportCoordinator:
                 results[format_name] = None
                 continue
                 
-            if format_ext == '.pdf' and not PDF_AVAILABLE:
-                results[format_name] = None
-                continue
-            
             # Export to the format
             if base_filename:
                 custom_name = f"{base_filename}{format_ext}"
