@@ -685,7 +685,8 @@ class ProcessingPipeline:
         
         # Step 1: Read VINs and additional data from CSV
         csv_reader = CsvReader(self.input_path)
-        vins = csv_reader.read_vins()
+        cached_val = getattr(self, "cached_validation", None)
+        vins = csv_reader.read_vins(cached_validation=cached_val)
         
         if not vins:
             log("No valid VINs found in input file")
@@ -1285,31 +1286,36 @@ class BatchProcessor:
         self.provider = VehicleDataProvider(cache_enabled=True)
         self.stop_event = threading.Event()
         self.current_pipeline = None
+        self._done_event = threading.Event()
     
     def process_file(self, input_path: str, output_path: str,
                    log_callback: Optional[Callable[[str], None]] = None,
                    progress_callback: Optional[Callable[[int, int], None]] = None,
-                   done_callback: Optional[Callable[[List[FleetVehicle]], None]] = None) -> None:
+                   done_callback: Optional[Callable[[List[FleetVehicle]], None]] = None,
+                   cached_validation: Optional['FileValidationResult'] = None) -> None:
         """
         Process a CSV file in a background thread.
-        
+
         Args:
             input_path: Path to input CSV
             output_path: Path to output CSV
             log_callback: Callback for logging messages
             progress_callback: Callback for progress updates
             done_callback: Callback for completion notification
+            cached_validation: Pre-validated FileValidationResult to skip re-validation.
         """
-        # Reset stop event
+        # Reset events
         self.stop_event.clear()
-        
+        self._done_event.clear()
+
         # Create processing pipeline
         self.current_pipeline = ProcessingPipeline(
             input_path=input_path,
             output_path=output_path,
             max_threads=self.max_threads
         )
-        
+        self.current_pipeline.cached_validation = cached_validation
+
         # Start processing thread
         thread = threading.Thread(
             target=self._run_pipeline,
@@ -1352,3 +1358,5 @@ class BatchProcessor:
             # Call done callback with empty list to signal completion
             if done_callback:
                 done_callback([])
+        finally:
+            self._done_event.set()

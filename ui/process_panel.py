@@ -586,7 +586,8 @@ class ProcessPanel(ttk.Frame):
         if self.on_process_callback:
             options = {
                 "max_threads": self.max_threads_var.get(),
-                "skip_existing": self.skip_existing_var.get()
+                "skip_existing": self.skip_existing_var.get(),
+                "cached_validation": self.current_validation,
             }
             try:
                 self.on_process_callback(input_file, output_file, options)

@@ -28,7 +28,7 @@ from settings import (
     DEFAULT_EV_EFFICIENCY,
     CHART_TYPES
 )
-from utils import SimpleTooltip, ProgressDialog
+from utils import SimpleTooltip, ProgressDialog, ScrollableFrame
 from data.models import FleetVehicle, Fleet
 from ui.theme import Colors, Fonts, Spacing
 from analysis.calculations import (
@@ -93,6 +93,9 @@ class AnalysisPanel(ttk.Frame):
         self.ev_efficiency_var = tk.DoubleVar(value=DEFAULT_EV_EFFICIENCY)
         self.analysis_years_var = tk.IntVar(value=10)
         self.discount_rate_var = tk.DoubleVar(value=5.0)
+        self.incentive_amount_var = tk.DoubleVar(value=0.0)
+        # Tracks per-incentive checkbox vars; rebuilt by _on_state_selected
+        self._incentive_check_vars: List[Tuple[tk.BooleanVar, float]] = []
         
         # Charging parameters
         self.charging_pattern_var = tk.StringVar(value="standard")
@@ -122,7 +125,9 @@ class AnalysisPanel(ttk.Frame):
         self.paned_window.add(left_panel_container, weight=30)
         
         # Create scrollable left panel
-        self._create_scrollable_left_panel(left_panel_container)
+        self._sf_left = ScrollableFrame(left_panel_container)
+        self._sf_left.pack(fill="both", expand=True)
+        self.left_panel = self._sf_left.scrollable_frame
         
         # Create right panel (charts)
         self.right_panel = ttk.Frame(self.paned_window)
@@ -133,49 +138,6 @@ class AnalysisPanel(ttk.Frame):
         
         # Create chart area in right panel
         self._create_right_panel()
-    
-    def _create_scrollable_left_panel(self, container):
-        """Create a scrollable container for the left panel controls."""
-        # Create canvas and scrollbar
-        self.left_canvas = tk.Canvas(container, bg="#f0f0f0", highlightthickness=0)
-        left_scrollbar = ttk.Scrollbar(container, orient="vertical", command=self.left_canvas.yview)
-        
-        # Create the actual left panel frame inside canvas
-        self.left_panel = ttk.Frame(self.left_canvas)
-        
-        # Configure canvas scrolling
-        self.left_panel.bind(
-            "<Configure>",
-            lambda e: self.left_canvas.configure(scrollregion=self.left_canvas.bbox("all"))
-        )
-        
-        # Create window in canvas
-        self.left_canvas_window = self.left_canvas.create_window((0, 0), window=self.left_panel, anchor="nw")
-        self.left_canvas.configure(yscrollcommand=left_scrollbar.set)
-        
-        # Pack canvas and scrollbar
-        self.left_canvas.pack(side="left", fill="both", expand=True)
-        left_scrollbar.pack(side="right", fill="y")
-        
-        # Enable mousewheel scrolling
-        def on_mousewheel(event):
-            self.left_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        
-        def on_enter(event):
-            self.left_canvas.bind_all("<MouseWheel>", on_mousewheel)
-        
-        def on_leave(event):
-            self.left_canvas.unbind_all("<MouseWheel>")
-        
-        # Bind mousewheel only when mouse is over left panel
-        self.left_canvas.bind("<Enter>", on_enter)
-        self.left_canvas.bind("<Leave>", on_leave)
-        
-        # Bind canvas width to frame width for proper horizontal sizing
-        def on_canvas_configure(event):
-            self.left_canvas.itemconfig(self.left_canvas_window, width=event.width)
-        
-        self.left_canvas.bind("<Configure>", on_canvas_configure)
     
     def _create_left_panel(self):
         """Create analysis controls in the left panel."""
@@ -216,10 +178,19 @@ class AnalysisPanel(ttk.Frame):
         state_combo.bind("<<ComboboxSelected>>", self._on_state_selected)
         SimpleTooltip(state_label, "Select state to auto-populate gas and electricity prices")
 
-        # Incentives display label (updated when state changes)
-        self.incentive_label = ttk.Label(cost_frame, text="", font=("", 8),
-                                         foreground="#555555", wraplength=220)
-        self.incentive_label.pack(fill=tk.X, padx=5, pady=(0, 2))
+        # Incentive total readout
+        incentive_row = ttk.Frame(cost_frame)
+        incentive_row.pack(fill=tk.X, padx=5, pady=(0, 0))
+        ttk.Label(incentive_row, text="Incentives ($):").pack(side=tk.LEFT)
+        self.incentive_total_label = ttk.Label(incentive_row, text="$0",
+                                               foreground="#2a7a2a", font=("", 9, "bold"))
+        self.incentive_total_label.pack(side=tk.RIGHT)
+        SimpleTooltip(self.incentive_total_label,
+                      "Total incentives applied to EV purchase price in TCO calculation")
+
+        # Incentive checkboxes container (hidden until state is selected)
+        self.incentive_check_frame = ttk.Frame(cost_frame)
+        self.incentive_check_frame.pack(fill=tk.X, padx=5, pady=(0, 4))
 
         # Gas price
         gas_frame = ttk.Frame(cost_frame)
@@ -875,7 +846,8 @@ class AnalysisPanel(ttk.Frame):
                     electricity_price=electricity_price,
                     ev_efficiency=ev_efficiency,
                     analysis_years=analysis_years,
-                    discount_rate=discount_rate
+                    discount_rate=discount_rate,
+                    incentive_amount=self.incentive_amount_var.get(),
                 )
                 
                 # Update progress
@@ -1074,7 +1046,8 @@ class AnalysisPanel(ttk.Frame):
                     electricity_price=self.electricity_price_var.get(),
                     ev_efficiency=self.ev_efficiency_var.get(),
                     analysis_years=self.analysis_years_var.get(),
-                    discount_rate=self.discount_rate_var.get()
+                    discount_rate=self.discount_rate_var.get(),
+                    incentive_amount=self.incentive_amount_var.get(),
                 )
 
                 # 2. Emissions
@@ -1132,32 +1105,61 @@ class AnalysisPanel(ttk.Frame):
         except Exception as e:
             logger.warning(f"Could not navigate to Present tab: {e}")
 
+    def _on_incentive_toggled(self):
+        """Recalculate incentive total when a checkbox changes."""
+        total = sum(amt for var, amt in self._incentive_check_vars if var.get())
+        self.incentive_amount_var.set(total)
+        self.incentive_total_label.config(
+            text=f"${total:,.0f}" if total > 0 else "$0"
+        )
+
     def _on_state_selected(self, event=None):
-        """Handle state selection — update gas/electricity prices and show incentives."""
+        """Handle state selection — update gas/electricity prices and build incentive checkboxes."""
         selected = self.state_var.get()
+
+        # Clear existing checkboxes
+        for widget in self.incentive_check_frame.winfo_children():
+            widget.destroy()
+        self._incentive_check_vars.clear()
+        self.incentive_amount_var.set(0.0)
+        self.incentive_total_label.config(text="$0")
+
         if not selected or selected == "(National Avg)":
             self.gas_price_var.set(3.50)
             self.electricity_price_var.set(0.13)
-            self.incentive_label.config(text="")
             return
 
         rates = get_rates_for_state(selected)
         self.gas_price_var.set(rates["gas_price"])
         self.electricity_price_var.set(rates["electricity_price"])
 
-        # Show available incentives
+        # Build incentive checkboxes
         incentives = get_all_incentives(selected)
-        parts = []
-        if incentives["max_federal"] > 0:
-            parts.append(f"Federal: up to ${incentives['max_federal']:,}")
-        if incentives["max_state"] > 0:
-            names = [i["name"] for i in incentives["state_incentives"]]
-            parts.append(f"State: {', '.join(names)}")
+        all_programs = (
+            [("Federal", i) for i in incentives.get("federal_incentives", [])] +
+            [("State", i) for i in incentives.get("state_incentives", [])]
+        )
 
-        if parts:
-            self.incentive_label.config(text="Incentives: " + " | ".join(parts))
-        else:
-            self.incentive_label.config(text=f"No state-specific incentives found for {selected}")
+        if not all_programs:
+            ttk.Label(self.incentive_check_frame, text="No incentives available",
+                      font=("", 8), foreground="#888888").pack(anchor=tk.W)
+            return
+
+        for source, prog in all_programs:
+            amount = prog.get("max_amount", 0)
+            if amount <= 0:
+                continue
+            var = tk.BooleanVar(value=False)
+            self._incentive_check_vars.append((var, amount))
+            label_text = f"{prog['name']} — up to ${amount:,}"
+            cb = ttk.Checkbutton(
+                self.incentive_check_frame,
+                text=label_text,
+                variable=var,
+                command=self._on_incentive_toggled,
+            )
+            cb.pack(anchor=tk.W)
+            SimpleTooltip(cb, prog.get("description", ""))
 
     def _export_menu(self):
         """Show export format selection menu."""
@@ -1291,7 +1293,8 @@ class AnalysisPanel(ttk.Frame):
                         electricity_price=self.electricity_price_var.get(),
                         ev_efficiency=self.ev_efficiency_var.get(),
                         analysis_years=self.analysis_years_var.get(),
-                        discount_rate=self.discount_rate_var.get()
+                        discount_rate=self.discount_rate_var.get(),
+                        incentive_amount=self.incentive_amount_var.get(),
                     )
                 
                 if not self.emissions_inventory:

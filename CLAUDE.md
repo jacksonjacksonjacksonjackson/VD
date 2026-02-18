@@ -24,7 +24,7 @@ python app.py -b -i in.csv -o out.csv  # Batch mode
 ### Testing
 
 ```bash
-python -m pytest tests/ -v           # Run all 151 tests
+python -m pytest tests/ -v           # Run all 163 tests
 python -m pytest tests/ -v -k acf    # Run only ACF compliance tests
 python -m pytest tests/ -v --tb=short  # Shorter tracebacks
 ```
@@ -95,24 +95,17 @@ Dead `utils.py` duplicates removed (`extract_gvwr_pounds`, `detect_commercial_ve
 - **Column mapping** (`_map_additional_columns`) still in both `CsvFileValidator` and `ProcessingPipeline`
 - **VIN column detection** deprecated `CsvReader._find_vin_column` wrapper still exists in `processor.py:486`
 
-### 3. Fix the Double-Validation Problem (Medium Priority, Low Risk)
+### ~~3. Fix the Double-Validation Problem (Medium Priority, Low Risk)~~ — DONE (Phase 10)
 
-`CsvReader.read_vins()` calls `self.validate_file()` which runs the full `CsvFileValidator.validate_and_preview()` pipeline. But the UI also calls validation separately before processing starts. This means every CSV is validated twice — once for preview and once when processing begins. The validation should happen once, and the result should be passed to the reader.
+`process_panel.py` stores `self.current_validation` from the preview step and now passes it via `options["cached_validation"]` → `main_window.start_processing()` → `BatchProcessor.process_file(cached_validation=...)` → `ProcessingPipeline.process()` → `CsvReader.read_vins(cached_validation=...)`. The `cached_validation` parameter on `read_vins()` was already in place; the 4-file plumbing is now complete.
 
 ### ~~4. Add a Proper Test Suite (High Priority, Medium Risk)~~ — DONE (Phase 7)
 
 151 pytest tests covering VIN validation, GVWR parsing, model normalization, quality scoring, CSV column mapping, TCO/ROI calculations, ACF compliance, electrification timeline, and emissions inventory. `diagnostic_test.py` still exists but is superseded.
 
-### 5. Fix the Batch Mode Wait Loop (Medium Priority, Low Risk)
+### ~~5. Fix the Batch Mode Wait Loop (Medium Priority, Low Risk)~~ — DONE (Phase 10)
 
-In `app.py:117-121`, batch mode uses a busy-wait polling loop:
-
-```python
-while processor.current_pipeline and processor.current_pipeline.processing_thread and processor.current_pipeline.processing_thread.is_alive():
-    time.sleep(0.1)
-```
-
-This is fragile. `BatchProcessor` doesn't expose a `processing_thread` attribute — it starts a daemon thread in `process_file()` but stores no reference. This code likely doesn't work as intended. Replace with `threading.Event` that's set when processing completes.
+Added `_done_event = threading.Event()` to `BatchProcessor`. The event is cleared in `process_file()` and set in the `finally` block of `_run_pipeline()`. `app.py` batch mode now calls `processor._done_event.wait()` instead of the broken poll loop that referenced the nonexistent `processing_thread` attribute.
 
 ### ~~6. Clean Up `utils.py` Responsibilities (Medium Priority, Low Risk)~~ — DONE (Phase 8)
 
@@ -131,8 +124,8 @@ Added `is_diesel` parameter to `FuelEconomyClient.find_vehicle_matches()` with f
 PDF/JSON/HTML removed from `EXPORT_FORMATS` (Phase 5, Fix 40). `CACHE_CONFIG` deleted from `settings.py` (Phase 8 — unused; actual Cache class uses `CACHE_EXPIRY` and `DEFAULT_CACHE_FILE`). `CsvReader._find_vin_column` deprecated wrapper deleted from `processor.py` (Phase 8). `diagnostic_test.py` deleted (Phase 8 — superseded by pytest suite).
 
 **Intentionally kept:**
-- `MATCHING_WEIGHTS` and `MIN_MATCH_CONFIDENCE` in `settings.py` — not currently wired into the matching code, but represent a valuable future improvement (see Recommendation #14 below). The matching logic in `providers.py` currently uses hardcoded point values; these config entries define a more configurable design that should be implemented.
-- `ScrollableFrame` in `ui/widgets.py` — not currently instantiated, but the exact same scrollable-canvas pattern is reimplemented ad-hoc in 4+ places (`main_window.py` column dialog, `analysis_panel.py` left panel, `present_panel.py` slide options, `theme.py` helper). Worth consolidating these callers to use `ScrollableFrame` instead.
+- ~~`MATCHING_WEIGHTS` and `MIN_MATCH_CONFIDENCE` in `settings.py` — not currently wired into the matching code~~ — WIRED (Phase 10, Rec #14). See Rec #14 below.
+- ~~`ScrollableFrame` in `ui/widgets.py` — not currently instantiated~~ — CONSOLIDATED (Phase 10, Rec #15). See Rec #15 below.
 
 ### ~~10. Improve Error Handling in `commercial_vehicle_scraper.py` (Low Priority, Low Risk)~~ — DONE (Phase 1, Fix 5)
 
@@ -153,23 +146,19 @@ Move these to explicit initialization functions called from `app.py`.
 
 The app uses `sys.path.insert(0, ...)` in `app.py` to fix imports. A proper `pyproject.toml` or `setup.py` with package structure would make imports clean and enable `pip install -e .` for development.
 
-### 14. Wire Up Configurable Matching Weights (Medium Priority, Medium Risk)
+### ~~14. Wire Up Configurable Matching Weights (Medium Priority, Medium Risk)~~ — DONE (Phase 10)
 
-`MATCHING_WEIGHTS` and `MIN_MATCH_CONFIDENCE` exist in `settings.py` but the matching code in `providers.py` (`FuelEconomyClient.find_vehicle_matches()`, around line 860) uses hardcoded point values instead. The config defines a richer weighted scheme (exact_vin: 100, year_make_model: 80, engine_match: 20, displacement: 15, cylinders: 10, fuel_type: 10, drive: 5, transmission: 5) that would make matching tunable without code changes. Implementation would involve:
+`_calculate_match_confidence()` in `providers.py` now reads all point values from `MATCHING_WEIGHTS` (imported from `settings.py`). Scoring covers year/make/model tiers, engine displacement, cylinders, fuel type, drive type, and transmission. `MIN_MATCH_CONFIDENCE` applied as a warning threshold — low-confidence matches are logged at WARNING level (matches still returned; data is still useful). 12 new tests in `tests/test_match_confidence.py` cover each signal component.
 
-- Refactoring the confidence calculation in `providers.py` to read weights from `MATCHING_WEIGHTS`
-- Applying `MIN_MATCH_CONFIDENCE` as a threshold to reject low-quality matches
-- Exposing these settings in the Preferences UI for advanced users
+### ~~15. Consolidate Scrollable Frame Implementations (Low Priority, Low Risk)~~ — DONE (Phase 10)
 
-### 15. Consolidate Scrollable Frame Implementations (Low Priority, Low Risk)
+All 4 ad-hoc canvas-scrollbar-inner-frame reimplementations replaced with `ScrollableFrame` from `ui/widgets.py`:
+- `main_window.py` `customize_columns()` — `ScrollableFrame` replaces manual canvas + `on_frame_configure` bind
+- `analysis_panel.py` — `_create_scrollable_left_panel()` method deleted; `ScrollableFrame` inline in `_create_layout()`
+- `present_panel.py` `_create_scrollable_container()` — method deleted; `ScrollableFrame` inline in `__init__()`
+- `present_panel.py` slide options area — replaced with `ScrollableFrame`
 
-`ui/widgets.py` has a reusable `ScrollableFrame` class, but the codebase has 4+ ad-hoc reimplementations of the same canvas-scrollbar-inner-frame pattern:
-- `main_window.py` `customize_columns()` (column selection dialog)
-- `analysis_panel.py` `_create_scrollable_left_panel()`
-- `present_panel.py` `_create_scrollable_container()` and slide options area
-- `theme.py` `create_scrollable_frame()` helper
-
-These should be migrated to use `ScrollableFrame` for consistency and to reduce duplicated scrolling logic.
+`ScrollableFrame` is superior to the ad-hoc versions: proper enter/leave mousewheel bind/unbind (vs global `bind_all`), canvas-width tracking via `_configure_canvas_window`, and cross-platform scroll events (Button-4/5 for Linux).
 
 ---
 
@@ -546,11 +535,9 @@ Added state-level energy rates and federal/state incentive programs so TCO calcu
 
 **UI integration in `ui/analysis_panel.py`:**
 - [x] State selector combobox in Cost Parameters tab with `_on_state_selected()` handler that auto-populates gas/electricity prices.
-- [x] Incentive display label showing available programs and max total when state is selected.
+- [x] Incentive checkboxes auto-sum into `incentive_amount_var` (wired to all 3 `analyze_fleet_electrification()` call sites). Replaced static info label with per-program checkboxes; checking a box adds its `max_amount` to the TCO incentive deduction. Live total shown next to "Incentives ($):" readout.
 
-**Phase 9H Status:** Complete. New file: `analysis/rate_database.py`. Modified: `ui/analysis_panel.py`. All 151 tests passing.
-
-**Known remaining polish:** Incentives are displayed as information text, not as user-selectable checkboxes. The incentive total is not yet automatically wired into the TCO `incentive_amount` parameter — user must manually enter it. Future enhancement: add checkboxes and auto-sum into the TCO input.
+**Phase 9H Status:** Complete (including Phase 10 auto-wiring). New file: `analysis/rate_database.py`. Modified: `ui/analysis_panel.py`. All 163 tests passing.
 
 #### Phase 9I: Analysis-Ready Excel Export — DONE
 
@@ -584,16 +571,16 @@ Added client-facing customization controls so users can personalize presentation
 
 **Phase 9J Status:** Complete. Files modified: `ui/present_panel.py` (~1,015 lines, up from 755), `powerpoint_export.py` (1 line). All 151 tests passing.
 
-**Phase 9 Status:** All 10 sub-phases (9A–9J) complete. See "Known Remaining Polish" notes on 9F, 9H, and 9I for future enhancement opportunities.
+**Phase 9 Status:** All 10 sub-phases (9A–9J) complete. Phase 10 addressed remaining polish items #2 (9H incentive auto-wiring), Rec #3, #5, #14, #15. See "Known Remaining Polish" for outstanding items.
 
 ---
 
-## Known Remaining Polish (Post-Phase 9)
+## Known Remaining Polish (Post-Phase 10)
 
-These are minor gaps identified during reconciliation audits. None are bugs — the features work correctly. They represent future enhancement opportunities.
+These are minor gaps. None are bugs — the features work correctly. They represent future enhancement opportunities.
 
 1. **9F — Figure size enforcement:** `FIG_SIZE_SLIDE`/`FIG_SIZE_HALF` constants defined but only used by `DecisionCharts`. Older chart methods use caller-provided figure sizes. Cosmetic only.
-2. **9H — Incentive auto-wiring:** Incentives display as informational text. They are not yet user-selectable checkboxes that auto-sum into the TCO `incentive_amount` parameter.
+2. **~~9H — Incentive auto-wiring~~:** DONE (Phase 10). Incentive checkboxes auto-sum into `incentive_amount_var`, wired to TCO calculation.
 3. **9I — Excel formula cells:** TCO Model sheet writes static Python-computed values, not live `=` formulas. Users cannot change assumptions in Excel and see live updates.
 4. **9E — Scenario UI selector:** The scenario comparison slide always runs all 4 preset scenarios. No UI exists to let users select which scenarios to include or define custom ones.
 5. **9A — Parameter exposure:** `battery_degradation`, `residual_value_ice_pct`, and `residual_value_ev_pct` are not exposed as parameters on `analyze_fleet_electrification()` — they use defaults internally. Callers cannot customize without modifying `calculate_yearly_cash_flows()` directly.

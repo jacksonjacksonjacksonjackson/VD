@@ -35,7 +35,7 @@ from settings import (
     USER_SETTINGS,
     save_user_settings
 )
-from utils import StatusBar, SimpleTooltip, ProgressDialog, SafeDict, timestamp
+from utils import StatusBar, SimpleTooltip, ProgressDialog, SafeDict, timestamp, ScrollableFrame
 
 # Import UI panels
 from ui.process_panel import ProcessPanel
@@ -694,41 +694,24 @@ class MainWindow:
             font=("", 10, "bold")
         ).pack(anchor=tk.W, padx=10, pady=5)
         
-        # Create a frame with scrollbar for checkboxes
-        checkbox_frame = ttk.Frame(columns_dialog)
-        checkbox_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        
-        # Create canvas and scrollbar
-        canvas = tk.Canvas(checkbox_frame)
-        scrollbar = ttk.Scrollbar(checkbox_frame, orient=tk.VERTICAL, command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        # Create a frame inside the canvas for checkboxes
-        inner_frame = ttk.Frame(canvas)
-        canvas.create_window((0, 0), window=inner_frame, anchor=tk.NW)
-        
+        # Create a scrollable frame for checkboxes
+        sf_cols = ScrollableFrame(columns_dialog)
+        sf_cols.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        inner_frame = sf_cols.scrollable_frame
+
         # Create checkbox variables
         checkbox_vars = {}
-        
+
         # Create checkboxes for each column
         for i, (col_id, col_name) in enumerate(all_columns):
             var = tk.BooleanVar(value=col_id in visible_columns)
             checkbox_vars[col_id] = var
-            
+
             ttk.Checkbutton(
                 inner_frame,
                 text=col_name,
                 variable=var
             ).grid(row=i, column=0, sticky=tk.W, padx=5, pady=2)
-        
-        # Update canvas when frame size changes
-        def on_frame_configure(event):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-        
-        inner_frame.bind("<Configure>", on_frame_configure)
         
         # Add buttons
         button_frame = ttk.Frame(columns_dialog)
@@ -1004,6 +987,7 @@ and industry sources to ensure comprehensive and accurate specifications.
         
         # Get processing options
         max_threads = options.get("max_threads", 10)
+        cached_validation = options.get("cached_validation")
         
         # Define callbacks — marshal to main thread for Tkinter safety
         def log_callback(message):
@@ -1071,7 +1055,8 @@ and industry sources to ensure comprehensive and accurate specifications.
             output_path=output_path,
             log_callback=log_callback,
             progress_callback=progress_callback,
-            done_callback=done_callback
+            done_callback=done_callback,
+            cached_validation=cached_validation,
         )
     
     def stop_processing(self):

@@ -23,7 +23,9 @@ from settings import (
     MAX_RETRIES,
     RETRY_DELAY,
     RATE_LIMIT_DELAY,
-    DEFAULT_CACHE_FILE
+    DEFAULT_CACHE_FILE,
+    MATCHING_WEIGHTS,
+    MIN_MATCH_CONFIDENCE,
 )
 from utils import Cache, case_insensitive_equal, normalize_vehicle_model
 from data.models import (
@@ -808,6 +810,13 @@ class VehicleDataProvider:
         if fuel_type_mismatch:
             match_confidence = max(0.0, match_confidence - 15.0)
 
+        # Warn when confidence falls below the configured threshold
+        if match_confidence < MIN_MATCH_CONFIDENCE:
+            logger.warning(
+                f"Low-confidence match for {vin} ({match_confidence:.0f}% < "
+                f"{MIN_MATCH_CONFIDENCE}% threshold): {best_match.get('text', '')}"
+            )
+
         return True, {
             "vin": vin,
             "vehicle_id": vehicle_id.to_dict(),
@@ -857,61 +866,73 @@ class VehicleDataProvider:
         
         return results
     
-    def _calculate_match_confidence(self, vehicle_id: VehicleIdentification, 
+    def _calculate_match_confidence(self, vehicle_id: VehicleIdentification,
                                    fe_data: Dict[str, Any], match_text: str) -> float:
         """
         Calculate confidence score for the match between VIN data and fuel economy data.
-        
-        Args:
-            vehicle_id: Vehicle identification from VIN
-            fe_data: Fuel economy data
-            match_text: Text description of the matched vehicle
-            
+
+        Scoring uses MATCHING_WEIGHTS from settings.py so thresholds are tunable
+        without code changes.
+
         Returns:
             Confidence score (0-100)
         """
-        score = 50.0  # Start with moderate confidence
-        
-        # Basic year, make, model match
-        if vehicle_id.year == fe_data.get("year", ""):
-            score += 15.0
-        
-        if case_insensitive_equal(vehicle_id.make, fe_data.get("make", "")):
-            score += 15.0
-        
-        # Model might be partial match
-        if vehicle_id.model.lower() in fe_data.get("model", "").lower():
-            score += 10.0
-        
-        # Engine displacement match
+        w = MATCHING_WEIGHTS
+        score = 0.0
+
+        # --- Year / make / model ---
+        year_ok = vehicle_id.year == fe_data.get("year", "")
+        make_ok = case_insensitive_equal(vehicle_id.make, fe_data.get("make", ""))
+        model_ok = bool(vehicle_id.model and
+                        vehicle_id.model.lower() in fe_data.get("model", "").lower())
+
+        if year_ok and make_ok and model_ok:
+            score += w.get("year_make_model", 80)
+        elif year_ok and make_ok:
+            score += w.get("year_make", 60)
+        elif make_ok and model_ok:
+            score += w.get("make_model", 50)
+
+        # --- Engine displacement ---
         if vehicle_id.engine_displacement:
             fe_displ = fe_data.get("displ", "")
             try:
-                # Try to extract numeric value from engine displacement
-                # Handle formats like "361/479", "5.0L", "350", etc.
-                vin_displ_str = str(vehicle_id.engine_displacement).strip()
-                fe_displ_str = str(fe_displ).strip()
-                
-                # Extract first numeric value for comparison
-                vin_match = re.search(r'(\d+\.?\d*)', vin_displ_str)
-                fe_match = re.search(r'(\d+\.?\d*)', fe_displ_str)
-                
-                if vin_match and fe_match:
-                    vin_displ = float(vin_match.group(1))
-                    fe_displ_val = float(fe_match.group(1))
-                    
-                    if abs(vin_displ - fe_displ_val) < 0.1:
-                        score += 5.0
-            except (ValueError, TypeError, AttributeError) as e:
-                # Log but don't fail - displacement comparison is optional
-                logger.debug(f"Could not compare engine displacements: VIN '{vehicle_id.engine_displacement}' vs FE '{fe_displ}': {e}")
-                pass
-        
-        # Cylinders match
-        if vehicle_id.engine_cylinders:
-            fe_cyl = fe_data.get("cylinders", "")
-            if vehicle_id.engine_cylinders == fe_cyl:
-                score += 5.0
-        
-        # Cap the score at 100
+                vin_m = re.search(r'(\d+\.?\d*)', str(vehicle_id.engine_displacement).strip())
+                fe_m = re.search(r'(\d+\.?\d*)', str(fe_displ).strip())
+                if vin_m and fe_m and abs(float(vin_m.group(1)) - float(fe_m.group(1))) < 0.1:
+                    score += w.get("displacement_match", 15)
+            except (ValueError, TypeError, AttributeError) as exc:
+                logger.debug(
+                    f"Could not compare engine displacements: "
+                    f"VIN '{vehicle_id.engine_displacement}' vs FE '{fe_displ}': {exc}"
+                )
+
+        # --- Engine match bonus (displacement + cylinders both hit) ---
+        cyl_ok = bool(vehicle_id.engine_cylinders and
+                      vehicle_id.engine_cylinders == str(fe_data.get("cylinders", "")))
+        if cyl_ok:
+            score += w.get("cylinders_match", 10)
+
+        # Award engine_match bonus only when both displacement and cylinders agree
+        if vehicle_id.engine_displacement and cyl_ok:
+            score += w.get("engine_match", 20)
+
+        # --- Fuel type ---
+        if vehicle_id.fuel_type:
+            fe_fuel = fe_data.get("fuelType1", "") or fe_data.get("fuelType", "")
+            if fe_fuel and case_insensitive_equal(vehicle_id.fuel_type, fe_fuel):
+                score += w.get("fuel_type_match", 10)
+
+        # --- Drive type ---
+        if vehicle_id.drive_type:
+            fe_drive = fe_data.get("drive", "")
+            if fe_drive and case_insensitive_equal(vehicle_id.drive_type, fe_drive):
+                score += w.get("drive_match", 5)
+
+        # --- Transmission ---
+        if vehicle_id.transmission:
+            fe_tranny = fe_data.get("trany", "")
+            if fe_tranny and vehicle_id.transmission.lower() in fe_tranny.lower():
+                score += w.get("transmission_match", 5)
+
         return min(100.0, score)

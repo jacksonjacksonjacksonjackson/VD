@@ -19,7 +19,7 @@ from settings import (
     SECONDARY_HEX_1,
     SECONDARY_HEX_2
 )
-from utils import SimpleTooltip, ProgressDialog
+from utils import SimpleTooltip, ProgressDialog, ScrollableFrame
 from powerpoint_export import export_prelim_deck
 from ui.theme import Colors, Fonts, Spacing
 from powerpoint_customizer import (
@@ -53,7 +53,9 @@ class PresentPanel:
         self.root = parent_frame.winfo_toplevel()
         
         # Create scrollable container
-        self._create_scrollable_container()
+        self._sf_main = ScrollableFrame(self.parent_frame)
+        self._sf_main.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.main_frame = self._sf_main.scrollable_frame
         
         # Initialize UI components
         self._create_header()
@@ -67,53 +69,6 @@ class PresentPanel:
 
         # Initialize data
         self._update_slide_options()
-    
-    def _create_scrollable_container(self):
-        """Create a scrollable container for all panel content."""
-        # Create outer container
-        outer_container = ttk.Frame(self.parent_frame)
-        outer_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # Create canvas and scrollbar
-        self.canvas = tk.Canvas(outer_container, bg="#f0f0f0", highlightthickness=0)
-        scrollbar = ttk.Scrollbar(outer_container, orient="vertical", command=self.canvas.yview)
-        
-        # Create the main frame inside canvas
-        self.main_frame = ttk.Frame(self.canvas)
-        
-        # Configure canvas scrolling
-        self.main_frame.bind(
-            "<Configure>",
-            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        )
-        
-        # Create window in canvas
-        self.canvas_window = self.canvas.create_window((0, 0), window=self.main_frame, anchor="nw")
-        self.canvas.configure(yscrollcommand=scrollbar.set)
-        
-        # Pack canvas and scrollbar
-        self.canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        
-        # Enable mousewheel scrolling
-        def on_mousewheel(event):
-            self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        
-        def on_enter(event):
-            self.canvas.bind_all("<MouseWheel>", on_mousewheel)
-        
-        def on_leave(event):
-            self.canvas.unbind_all("<MouseWheel>")
-        
-        # Bind mousewheel only when mouse is over this panel
-        self.canvas.bind("<Enter>", on_enter)
-        self.canvas.bind("<Leave>", on_leave)
-        
-        # Bind canvas width to frame width for proper horizontal sizing
-        def on_canvas_configure(event):
-            self.canvas.itemconfig(self.canvas_window, width=event.width)
-        
-        self.canvas.bind("<Configure>", on_canvas_configure)
     
     def _create_header(self):
         """Create the header section with title and description."""
@@ -351,29 +306,12 @@ class PresentPanel:
         instructions.pack(anchor=tk.W, pady=(0, 10))
         
         # Create scrollable frame for slide options
-        canvas_frame = ttk.Frame(custom_frame)
-        canvas_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # Canvas and scrollbar
-        canvas = tk.Canvas(canvas_frame, height=200)
-        scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas)
-        
-        # Configure scrolling
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-        
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        
-        # Pack canvas and scrollbar
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        
+        sf_slides = ScrollableFrame(custom_frame)
+        sf_slides.pack(fill=tk.BOTH, expand=True)
+        sf_slides.canvas.configure(height=200)
+
         # Store references
-        self.slides_frame = scrollable_frame
+        self.slides_frame = sf_slides.scrollable_frame
         self.slide_checkboxes = {}
         
         # Selection controls

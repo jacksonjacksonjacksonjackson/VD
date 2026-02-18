@@ -115,9 +115,7 @@ def run_batch_mode(args):
     )
     
     # Wait for processing to complete (preventing program exit)
-    import time
-    while processor.current_pipeline and processor.current_pipeline.processing_thread and processor.current_pipeline.processing_thread.is_alive():
-        time.sleep(0.1)
+    processor._done_event.wait()
     
     logger.info(f"Batch processing complete. Results saved to {args.output}")
     return 0
