@@ -768,26 +768,30 @@ class ExcelReportGenerator(ReportGenerator):
           Row 1       : Title (merged A1:J1)
           Row 2       : blank
           Row 3       : "Assumptions" header
-          Rows 4-14   : Assumption input cells in column B, labels in column A
-          Row 15      : blank
-          Row 16      : Column headers for the cash-flow table
-          Rows 17+    : One row per year; all cost/savings cells use =formulas referencing B4:B14
+          Rows 4-14   : Editable assumption cells in column B (yellow), labels in column A
+          Rows 15-16  : Read-only helper cells (avg fleet MPG, avg annual mileage)
+          Row 17      : blank
+          Row 18      : Column headers for the cash-flow table
+          Rows 19+    : One row per year; all cost/savings cells use =formulas referencing B4:B16
           Last rows   : Summary KPIs (also formula-based)
 
-        Assumption cells (all in column B, named via xlsxwriter cell reference):
-          B4  = Gas price ($/gal)
-          B5  = Electricity price ($/kWh)
-          B6  = EV efficiency (kWh/mile)
-          B7  = ICE maintenance ($/mile)
-          B8  = EV maintenance ($/mile)
-          B9  = Fuel escalation rate (% / yr)
-          B10 = Discount rate (%)
-          B11 = Battery degradation (% / yr)
-          B12 = Infrastructure cost per vehicle ($)
-          B13 = Fleet size (vehicles)
-          B14 = Analysis period (years)
+        Assumption cells (all in column B):
+          B4  = Gas price ($/gal)               ← editable (yellow)
+          B5  = Electricity price ($/kWh)        ← editable
+          B6  = EV efficiency (kWh/mile)         ← editable
+          B7  = ICE maintenance ($/mile)         ← editable
+          B8  = EV maintenance ($/mile)          ← editable
+          B9  = Fuel escalation rate (% / yr)    ← editable
+          B10 = Discount rate (%)                ← editable
+          B11 = Battery degradation (% / yr)     ← editable
+          B12 = Infrastructure cost/vehicle ($)  ← editable
+          B13 = Fleet size (vehicles)            ← editable
+          B14 = Analysis period (years)          ← editable
+          B15 = Avg fleet MPG                    ← read-only (fleet aggregate)
+          B16 = Avg annual mileage (miles)       ← read-only (fleet aggregate)
 
-        Consultants can change B4:B14 and every formula cell recalculates automatically.
+        Anchor cells K–O hold Year-1 base cost formulas that reference B4:B16.
+        Changing any editable assumption recalculates the entire model.
         """
         from settings import (
             DEFAULT_GAS_PRICE, DEFAULT_ELECTRICITY_PRICE, DEFAULT_EV_EFFICIENCY,
@@ -862,7 +866,26 @@ class ExcelReportGenerator(ReportGenerator):
         elec_price_val  = y1.get('electricity_price', DEFAULT_ELECTRICITY_PRICE)
         n_years         = max((cf.get('year', 0) for cf in cash_flows), default=0)
 
+        # Compute fleet-level aggregates needed for anchor cell formulas
+        vehicles_with_mpg = [
+            v for v in vehicles
+            if v.fuel_economy and v.fuel_economy.combined_mpg and v.fuel_economy.combined_mpg > 0
+        ]
+        avg_mpg = (
+            sum(v.fuel_economy.combined_mpg for v in vehicles_with_mpg) / len(vehicles_with_mpg)
+            if vehicles_with_mpg else 20.0
+        )
+        vehicles_with_mileage = [
+            v for v in vehicles
+            if getattr(v, 'annual_mileage_miles', None) and v.annual_mileage_miles > 0
+        ]
+        avg_mileage = (
+            sum(v.annual_mileage_miles for v in vehicles_with_mileage) / len(vehicles_with_mileage)
+            if vehicles_with_mileage else 15000.0
+        )
+
         # Assumption rows: (label, value, format, cell_hint)
+        # First 11 rows are editable (yellow); last 2 are read-only fleet aggregates.
         assumptions_def = [
             ("Gas Price ($/gal)",              gas_price_val,                              input_fmt,     "B4"),
             ("Electricity Price ($/kWh)",       elec_price_val,                             input_fmt,     "B5"),
@@ -875,6 +898,9 @@ class ExcelReportGenerator(ReportGenerator):
             ("Infrastructure Cost/Vehicle ($)", DEFAULT_INFRASTRUCTURE_COST_PER_VEHICLE,    input_fmt,     "B12"),
             ("Fleet Size (vehicles)",           len(vehicles),                              input_int_fmt, "B13"),
             ("Analysis Period (years)",         n_years or 12,                              input_int_fmt, "B14"),
+            # Read-only fleet aggregates — used by anchor formulas in columns K–O
+            ("Avg Fleet MPG (read-only)",       round(avg_mpg, 2),                          input_fmt,     "B15"),
+            ("Avg Annual Mileage (read-only)",  round(avg_mileage, 0),                      input_int_fmt, "B16"),
         ]
 
         # Named cells for formula references (0-indexed row, col 1 = column B)
@@ -923,6 +949,8 @@ class ExcelReportGenerator(ReportGenerator):
         infra_ref = aref("B12")
         size_ref  = aref("B13")
         yrs_ref   = aref("B14")
+        mpg_ref   = aref("B15")   # avg fleet MPG (read-only helper)
+        mi_ref    = aref("B16")   # avg annual mileage (read-only helper)
 
         # We also need per-vehicle MPG average to compute fuel costs.
         # Since we aggregate across the fleet, use the actual fleet_cash_flows values
@@ -951,21 +979,40 @@ class ExcelReportGenerator(ReportGenerator):
         ev_y1_maint   = cf1.get('ev_maintenance', 0)
         ev_y1_infra   = cf1.get('ev_infrastructure', 0)
 
-        # Anchor cells: write Year-1 base values as hidden helpers in columns K-O
-        # (off-screen, labelled so consultants can find them)
+        # Anchor cells: Year-1 base costs as live formulas referencing the assumptions block.
+        # Stored off-screen in columns K-O so they update when consultants change B4:B16.
+        #
+        # Formula logic (fleet-level totals for year 1):
+        #   ICE fuel     = (avg_mileage / avg_mpg) × gas_price × fleet_size
+        #   ICE maint    = avg_mileage × ICE_maintenance_rate × fleet_size
+        #   EV fuel      = avg_mileage × ev_efficiency × electricity_price × fleet_size
+        #   EV maint     = avg_mileage × EV_maintenance_rate × fleet_size
+        #   EV infra     = infra_cost_per_vehicle × fleet_size
+        #
+        # B15 = avg fleet MPG, B16 = avg annual mileage (both stored as read-only helpers above)
         ANCHOR_COL = 10  # column K (0-indexed)
-        ws.write(TABLE_HEADER_ROW, ANCHOR_COL,     "⟵ Anchor: ICE fuel yr1",  hint_fmt)
-        ws.write(TABLE_HEADER_ROW, ANCHOR_COL + 1, "⟵ Anchor: ICE maint yr1", hint_fmt)
-        ws.write(TABLE_HEADER_ROW, ANCHOR_COL + 2, "⟵ Anchor: EV fuel yr1",   hint_fmt)
-        ws.write(TABLE_HEADER_ROW, ANCHOR_COL + 3, "⟵ Anchor: EV maint yr1",  hint_fmt)
-        ws.write(TABLE_HEADER_ROW, ANCHOR_COL + 4, "⟵ Anchor: EV infra yr1",  hint_fmt)
+        ws.write(TABLE_HEADER_ROW, ANCHOR_COL,     "⟵ Anchor: ICE fuel yr1 (live formula)",  hint_fmt)
+        ws.write(TABLE_HEADER_ROW, ANCHOR_COL + 1, "⟵ Anchor: ICE maint yr1 (live formula)", hint_fmt)
+        ws.write(TABLE_HEADER_ROW, ANCHOR_COL + 2, "⟵ Anchor: EV fuel yr1 (live formula)",   hint_fmt)
+        ws.write(TABLE_HEADER_ROW, ANCHOR_COL + 3, "⟵ Anchor: EV maint yr1 (live formula)",  hint_fmt)
+        ws.write(TABLE_HEADER_ROW, ANCHOR_COL + 4, "⟵ Anchor: EV infra yr1 (live formula)",  hint_fmt)
 
-        ANCHOR_ROW = TABLE_DATA_START  # Year-0 row; anchor values go here
-        ws.write(ANCHOR_ROW, ANCHOR_COL,     ice_y1_fuel,  input_fmt)
-        ws.write(ANCHOR_ROW, ANCHOR_COL + 1, ice_y1_maint, input_fmt)
-        ws.write(ANCHOR_ROW, ANCHOR_COL + 2, ev_y1_fuel,   input_fmt)
-        ws.write(ANCHOR_ROW, ANCHOR_COL + 3, ev_y1_maint,  input_fmt)
-        ws.write(ANCHOR_ROW, ANCHOR_COL + 4, ev_y1_infra,  input_fmt)
+        ANCHOR_ROW = TABLE_DATA_START  # Year-0 row; anchor formulas go here
+        ws.write_formula(ANCHOR_ROW, ANCHOR_COL,
+                         f"={mi_ref}/{mpg_ref}*{gas_ref}*{size_ref}",
+                         input_fmt, ice_y1_fuel)
+        ws.write_formula(ANCHOR_ROW, ANCHOR_COL + 1,
+                         f"={mi_ref}*{ice_m_ref}*{size_ref}",
+                         input_fmt, ice_y1_maint)
+        ws.write_formula(ANCHOR_ROW, ANCHOR_COL + 2,
+                         f"={mi_ref}*{eff_ref}*{elec_ref}*{size_ref}",
+                         input_fmt, ev_y1_fuel)
+        ws.write_formula(ANCHOR_ROW, ANCHOR_COL + 3,
+                         f"={mi_ref}*{ev_m_ref}*{size_ref}",
+                         input_fmt, ev_y1_maint)
+        ws.write_formula(ANCHOR_ROW, ANCHOR_COL + 4,
+                         f"={infra_ref}*{size_ref}",
+                         input_fmt, ev_y1_infra)
 
         # Helper cell references
         def acref(offset):

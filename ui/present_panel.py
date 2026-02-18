@@ -352,8 +352,9 @@ class PresentPanel:
     def _create_scenario_section(self):
         """Create scenario selector for the Scenario Comparison slide.
 
-        Only visible when the 'scenario_comparison' slide is in the selected slides.
-        Lets consultants choose which of the 4 preset scenarios to include.
+        Lets consultants choose which of the 4 preset scenarios to include,
+        and optionally define a custom scenario with a target end year,
+        annual budget cap, and vehicle filter.
         """
         self._scenario_section_frame = ttk.LabelFrame(
             self.main_frame,
@@ -409,6 +410,71 @@ class PresentPanel:
             )
             desc_lbl.pack(side=tk.LEFT, padx=(5, 0))
 
+        # ── Custom scenario row ──────────────────────────────────────────────────
+        separator = ttk.Separator(self._scenario_section_frame, orient=tk.HORIZONTAL)
+        separator.pack(fill=tk.X, pady=(8, 6))
+
+        custom_row = ttk.Frame(self._scenario_section_frame)
+        custom_row.pack(fill=tk.X, pady=2)
+
+        self._custom_scenario_var = tk.BooleanVar(value=False)
+        custom_cb = ttk.Checkbutton(
+            custom_row,
+            text="Custom Scenario",
+            variable=self._custom_scenario_var,
+            command=self._on_custom_scenario_toggled,
+            width=22,
+        )
+        custom_cb.pack(side=tk.LEFT)
+
+        ttk.Label(
+            custom_row,
+            text="— Define your own target year, budget, and vehicle scope",
+            font=("Segoe UI", 9),
+            foreground="#666666",
+        ).pack(side=tk.LEFT, padx=(5, 0))
+
+        # Controls sub-frame (hidden until checkbox is ticked)
+        self._custom_scenario_frame = ttk.Frame(self._scenario_section_frame)
+
+        # Row 1: End Year + Annual Budget
+        params_row = ttk.Frame(self._custom_scenario_frame)
+        params_row.pack(fill=tk.X, pady=(6, 2))
+
+        ttk.Label(params_row, text="End Year:").pack(side=tk.LEFT)
+        self._custom_end_year_var = tk.IntVar(value=2032)
+        end_year_spin = ttk.Spinbox(
+            params_row,
+            from_=2025, to=2060,
+            textvariable=self._custom_end_year_var,
+            width=7,
+        )
+        end_year_spin.pack(side=tk.LEFT, padx=(4, 20))
+
+        ttk.Label(params_row, text="Annual Budget Cap ($):").pack(side=tk.LEFT)
+        self._custom_budget_var = tk.StringVar(value="0")
+        budget_entry = ttk.Entry(params_row, textvariable=self._custom_budget_var, width=14)
+        budget_entry.pack(side=tk.LEFT, padx=(4, 4))
+        ttk.Label(
+            params_row, text="(0 = unlimited)",
+            font=("Segoe UI", 9), foreground="#888888",
+        ).pack(side=tk.LEFT)
+
+        # Row 2: Vehicle filter
+        filter_row = ttk.Frame(self._custom_scenario_frame)
+        filter_row.pack(fill=tk.X, pady=(2, 4))
+
+        ttk.Label(filter_row, text="Include:").pack(side=tk.LEFT)
+        self._custom_filter_var = tk.StringVar(value="All Vehicles")
+        filter_combo = ttk.Combobox(
+            filter_row,
+            textvariable=self._custom_filter_var,
+            values=["All Vehicles", "ACF Regulated Only", "Medium+Heavy Only"],
+            state="readonly",
+            width=24,
+        )
+        filter_combo.pack(side=tk.LEFT, padx=(4, 0))
+
         # Validation label
         self._scenario_validation_label = ttk.Label(
             self._scenario_section_frame,
@@ -418,9 +484,21 @@ class PresentPanel:
         )
         self._scenario_validation_label.pack(anchor=tk.W, pady=(6, 0))
 
+    def _on_custom_scenario_toggled(self):
+        """Show or hide the custom scenario controls."""
+        if self._custom_scenario_var.get():
+            # Pack before the validation label (which is always the last child)
+            self._custom_scenario_frame.pack(fill=tk.X, padx=(26, 0),
+                                             before=self._scenario_validation_label)
+        else:
+            self._custom_scenario_frame.pack_forget()
+        self._on_scenario_selection_changed()
+
     def _on_scenario_selection_changed(self):
         """Validate that at least one scenario is selected."""
         selected = [k for k, v in self._scenario_vars.items() if v.get()]
+        if self._custom_scenario_var.get():
+            selected.append("custom")
         if not selected:
             self._scenario_validation_label.configure(
                 text="⚠ At least one scenario must be selected."
@@ -429,11 +507,40 @@ class PresentPanel:
             self._scenario_validation_label.configure(text="")
 
     def _get_selected_scenarios(self) -> list:
-        """Return list of selected scenario keys; falls back to all if none checked."""
+        """Return list of selected preset scenario keys; falls back to all if none checked."""
         selected = [k for k, v in self._scenario_vars.items() if v.get()]
-        if not selected:
+        if not selected and not self._custom_scenario_var.get():
             return ["aggressive", "moderate", "conservative", "acf_compliance"]
         return selected
+
+    def _get_custom_scenario(self):
+        """Return an ElectrificationScenario for the custom row, or None if not enabled."""
+        if not self._custom_scenario_var.get():
+            return None
+        from analysis.scenarios import ElectrificationScenario
+        try:
+            end_year = int(self._custom_end_year_var.get())
+        except (ValueError, tk.TclError):
+            end_year = 2032
+        try:
+            budget = float(self._custom_budget_var.get() or "0")
+        except ValueError:
+            budget = 0.0
+        filter_map = {
+            "All Vehicles":        "all",
+            "ACF Regulated Only":  "acf_only",
+            "Medium+Heavy Only":   "medium_heavy_only",
+        }
+        vehicle_filter = filter_map.get(self._custom_filter_var.get(), "all")
+        budget_desc = f", ${budget:,.0f}/yr cap" if budget > 0 else ", unlimited budget"
+        filter_desc = {"all": "", "acf_only": ", ACF only", "medium_heavy_only": ", M+H only"}.get(vehicle_filter, "")
+        return ElectrificationScenario(
+            name=f"Custom ({end_year}{filter_desc}{budget_desc})",
+            end_year=end_year,
+            budget_per_year=budget,
+            vehicle_filter=vehicle_filter,
+            description=f"User-defined scenario: replace by {end_year}{filter_desc}{budget_desc}",
+        )
 
     def _create_template_section(self):
         """Create the template selection section."""
@@ -916,6 +1023,7 @@ class PresentPanel:
                 'stage': stage,
                 'subtitle': subtitle if subtitle else f"{stage} Fleet Electrification Analysis",
                 'selected_scenarios': self._get_selected_scenarios(),
+                'custom_scenario': self._get_custom_scenario(),
             }
 
             # Start export in background thread

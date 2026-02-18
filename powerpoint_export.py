@@ -1297,9 +1297,11 @@ def _add_scenario_comparison_slide(prs: Presentation, data: dict) -> bool:
             'selected_scenarios',
             ["aggressive", "moderate", "conservative", "acf_compliance"]
         )
+        custom = data.get('custom_scenario')
         comparison = compare_scenarios(
             vehicles,
-            scenario_names=scenario_names
+            scenario_names=scenario_names,
+            custom_scenarios=[custom] if custom else None,
         )
 
         scenario_results = comparison.get("scenarios", [])

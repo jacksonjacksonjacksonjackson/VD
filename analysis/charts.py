@@ -218,13 +218,16 @@ class ChartFactory:
             **kwargs: Additional arguments for specific chart types
                 chart_style: Style name (default, minimal, dark, colorful)
                 color_scheme: Color scheme name (default, viridis, magma, plasma, inferno)
+                fig_size: (width, height) tuple; defaults to FIG_SIZE_HALF (10×5.6).
+                          Pass FIG_SIZE_SLIDE (13.33×7.5) for full-bleed slide export.
 
         Returns:
             Matplotlib Figure object
         """
-        # Extract style/color kwargs (not forwarded to individual chart methods)
+        # Extract style/color/size kwargs (not forwarded to individual chart methods)
         chart_style = kwargs.pop('chart_style', 'default')
         color_scheme = kwargs.pop('color_scheme', 'default')
+        fig_size = kwargs.pop('fig_size', FIG_SIZE_HALF)
 
         # Resolve matplotlib style sheet
         mpl_style = STYLE_MAP.get(chart_style, STYLE_MAP['default'])
@@ -239,7 +242,7 @@ class ChartFactory:
 
         # Create figure if not provided
         if figure is None:
-            figure = plt.figure(figsize=(8, 6), dpi=100)
+            figure = plt.figure(figsize=fig_size, dpi=100)
             figure.tight_layout(pad=3.0)
         else:
             figure.clear()
