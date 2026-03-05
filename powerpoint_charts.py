@@ -6,11 +6,10 @@ Creates editable charts directly in PowerPoint instead of static images.
 """
 
 import logging
-from typing import Dict, List, Any, Optional, Union, Tuple
-from datetime import datetime, timedelta
+from typing import Dict, List, Any, Optional
 
 try:
-    from pptx.chart.data import CategoryChartData, ChartData
+    from pptx.chart.data import CategoryChartData
     from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
     from pptx.util import Inches, Pt
     from pptx.dml.color import RGBColor
@@ -22,6 +21,55 @@ from data.models import FleetVehicle, Fleet
 from settings import PRIMARY_HEX_1, PRIMARY_HEX_3, SECONDARY_HEX_1
 
 logger = logging.getLogger(__name__)
+
+###############################################################################
+# Chart style helper
+###############################################################################
+
+def _apply_clean_style(chart, legend_pos=XL_LEGEND_POSITION.BOTTOM if PPTX_AVAILABLE else None,
+                       colors: Optional[List[str]] = None) -> None:
+    """Apply clean consulting-style formatting: no title, bottom legend, light gridlines."""
+    if not PPTX_AVAILABLE:
+        return
+    chart.has_title = False
+    if legend_pos is not None:
+        chart.has_legend = True
+        chart.legend.position = legend_pos
+        chart.legend.include_in_layout = False
+    else:
+        chart.has_legend = False
+
+    try:
+        chart.value_axis.has_major_gridlines = True
+        chart.value_axis.major_gridlines.format.line.color.rgb = RGBColor(0xE0, 0xE0, 0xE0)
+        chart.value_axis.major_gridlines.format.line.width = 6350  # 0.5pt
+    except Exception:
+        pass
+
+    _DEFAULT_COLORS = [
+        PRIMARY_HEX_1,    # charcoal
+        PRIMARY_HEX_3,    # reseda green
+        SECONDARY_HEX_1,  # deep orange
+        "#7B9E87",        # sage
+        "#A8C5DA",        # sky blue
+        "#D4A373",        # warm sand
+    ]
+    palette = colors or _DEFAULT_COLORS
+    series_list = list(chart.series)
+    for i, series in enumerate(series_list):
+        hex_c = palette[i % len(palette)]
+        r, g, b = int(hex_c[1:3], 16), int(hex_c[3:5], 16), int(hex_c[5:7], 16)
+        rgb = RGBColor(r, g, b)
+        try:
+            series.format.fill.solid()
+            series.format.fill.fore_color.rgb = rgb
+        except Exception:
+            pass
+        try:
+            series.format.line.color.rgb = rgb
+        except Exception:
+            pass
+
 
 ###############################################################################
 # Native PowerPoint Chart Functions
@@ -61,26 +109,28 @@ def add_fleet_composition_chart(slide, vehicles: List[FleetVehicle],
             chart_data
         ).chart
         
-        # Format chart with improved styling
+        # Styling
+        chart.has_title = False
         chart.has_legend = True
         chart.legend.position = XL_LEGEND_POSITION.RIGHT
-        chart.legend.font.size = Pt(10)
-        
-        # Format data labels
+        chart.legend.include_in_layout = False
+
+        # Data labels
         chart.plots[0].has_data_labels = True
         data_labels = chart.plots[0].data_labels
         data_labels.font.size = Pt(9)
         data_labels.font.bold = True
-        
-        # Apply brand colors
+
+        # Apply brand colors per-point
         series = chart.series[0]
+        palette = [PRIMARY_HEX_1, PRIMARY_HEX_3, SECONDARY_HEX_1,
+                   '#7B9E87', '#A8C5DA', '#D4A373', '#F38BA8', '#4ECDC4']
         for i, point in enumerate(series.points):
-            colors = [PRIMARY_HEX_1, PRIMARY_HEX_3, SECONDARY_HEX_1, '#4ECDC4', '#95E1D3', '#F38BA8']
-            color_hex = colors[i % len(colors)]
-            r, g, b = tuple(int(color_hex.lstrip('#')[j:j+2], 16) for j in (0, 2, 4))
+            hex_c = palette[i % len(palette)]
+            r, g, b = int(hex_c[1:3], 16), int(hex_c[3:5], 16), int(hex_c[5:7], 16)
             point.format.fill.solid()
             point.format.fill.fore_color.rgb = RGBColor(r, g, b)
-        
+
         return True
         
     except Exception as e:
@@ -505,10 +555,10 @@ def add_age_distribution_chart(slide, vehicles: List[FleetVehicle],
 def add_tco_comparison_chart(slide, vehicles: List[FleetVehicle],
                             left: float = 1, top: float = 2,
                             width: float = 8, height: float = 4) -> bool:
-    """Add stacked bar chart comparing fleet-wide ICE vs EV TCO.
+    """Add clustered column chart comparing fleet-wide ICE vs EV TCO.
 
     Reads EV equivalent pricing from custom_fields (set by ev_database.py).
-    Shows purchase, fuel, and maintenance cost components side-by-side.
+    Shows purchase, fuel, and maintenance cost components side-by-side (not stacked).
     """
     try:
         if not vehicles:
@@ -550,36 +600,27 @@ def add_tco_comparison_chart(slide, vehicles: List[FleetVehicle],
         if counted == 0:
             return False
 
+        # Restructure: categories = cost components, series = ICE vs EV
+        # COLUMN_CLUSTERED shows 3 side-by-side pairs (clearer than stacked)
         chart_data = CategoryChartData()
-        chart_data.categories = ['ICE Fleet', 'EV Fleet']
-        chart_data.add_series('Purchase', [round(ice_purchase), round(ev_purchase)])
-        chart_data.add_series('Fuel / Energy', [round(ice_fuel), round(ev_fuel)])
-        chart_data.add_series('Maintenance', [round(ice_maint), round(ev_maint)])
+        chart_data.categories = ['Purchase', 'Fuel / Energy', 'Maintenance']
+        chart_data.add_series('ICE Fleet', [round(ice_purchase), round(ice_fuel), round(ice_maint)])
+        chart_data.add_series('EV Fleet',  [round(ev_purchase), round(ev_fuel), round(ev_maint)])
 
         chart = slide.shapes.add_chart(
-            XL_CHART_TYPE.COLUMN_STACKED,
+            XL_CHART_TYPE.COLUMN_CLUSTERED,
             Inches(left), Inches(top),
             Inches(width), Inches(height),
             chart_data
         ).chart
 
-        chart.has_legend = True
-        chart.legend.position = XL_LEGEND_POSITION.BOTTOM
-        chart.legend.font.size = Pt(10)
-        chart.chart_title.text_frame.text = f"Total Cost of Ownership — {DEFAULT_VEHICLE_LIFESPAN}-Year Comparison ({counted} vehicles)"
-        chart.chart_title.text_frame.paragraphs[0].font.size = Pt(13)
-        chart.chart_title.text_frame.paragraphs[0].font.bold = True
-
-        chart.value_axis.axis_title.text_frame.text = "Total Cost ($)"
-        chart.value_axis.axis_title.text_frame.paragraphs[0].font.size = Pt(11)
-
-        colors = [PRIMARY_HEX_1, SECONDARY_HEX_1, PRIMARY_HEX_3]
-        for i, series in enumerate(chart.series):
-            color_hex = colors[i % len(colors)]
-            r, g, b = tuple(int(color_hex.lstrip('#')[j:j+2], 16) for j in (0, 2, 4))
-            series.format.fill.solid()
-            series.format.fill.fore_color.rgb = RGBColor(r, g, b)
-
+        _apply_clean_style(chart, legend_pos=XL_LEGEND_POSITION.BOTTOM,
+                           colors=[SECONDARY_HEX_1, PRIMARY_HEX_3])
+        try:
+            chart.value_axis.has_title = True
+            chart.value_axis.axis_title.text_frame.text = "Annual Cost ($)"
+        except Exception:
+            pass
         return True
 
     except Exception as e:
@@ -781,6 +822,182 @@ def add_scenario_comparison_chart(slide, scenario_results: list,
 
     except Exception as e:
         logger.error(f"Failed to create scenario comparison chart: {e}")
+        return False
+
+
+###############################################################################
+# Phase 24: Fleet Composition by ACF Category + Department/Facility Charts
+###############################################################################
+
+def add_acf_category_composition_chart(slide, vehicles: List[FleetVehicle],
+                                        left: float = 1.5, top: float = 1.8,
+                                        width: float = 10.0, height: float = 5.2) -> bool:
+    """Pie chart showing fleet composition by ACF compliance category.
+
+    Uses plain-English labels matching consultant/client language.
+    This replaces the body-type pie as the primary composition chart.
+    """
+    try:
+        if not vehicles:
+            return False
+
+        ACF_LABELS = {
+            "ZEV": "Already Zero-Emission (ZEV)",
+            "A":   "Light Duty (Exempt)",
+            "B":   "Medium or Heavy Duty (Mandate-Subject)",
+            "C":   "Body-Type Exempt",
+            "D":   "Emergency Vehicles (Excluded)",
+            "":    "Not Classified",
+        }
+        ACF_COLORS = {
+            "ZEV": "#4CAF50",
+            "A":   "#A8C5DA",
+            "B":   PRIMARY_HEX_1,
+            "C":   "#7B9E87",
+            "D":   SECONDARY_HEX_1,
+            "":    "#D0CCD0",
+        }
+        ACF_ORDER = ["B", "A", "C", "D", "ZEV", ""]
+
+        counts: Dict[str, int] = {}
+        for v in vehicles:
+            code = v.custom_fields.get("_acf_code", "")
+            counts[code] = counts.get(code, 0) + 1
+
+        labels, values, colors = [], [], []
+        for code in ACF_ORDER:
+            if counts.get(code, 0) > 0:
+                labels.append(ACF_LABELS.get(code, code))
+                values.append(counts[code])
+                colors.append(ACF_COLORS.get(code, "#D0CCD0"))
+
+        if not labels:
+            return False
+
+        chart_data = CategoryChartData()
+        chart_data.categories = labels
+        chart_data.add_series("Vehicles", values)
+
+        chart = slide.shapes.add_chart(
+            XL_CHART_TYPE.PIE,
+            Inches(left), Inches(top), Inches(width), Inches(height),
+            chart_data,
+        ).chart
+
+        chart.has_title = False
+        chart.has_legend = True
+        chart.legend.position = XL_LEGEND_POSITION.RIGHT
+        chart.legend.include_in_layout = False
+
+        chart.plots[0].has_data_labels = True
+        chart.plots[0].data_labels.font.size = Pt(10)
+        chart.plots[0].data_labels.font.bold = True
+
+        series = chart.series[0]
+        for i, point in enumerate(series.points):
+            hx = colors[i % len(colors)].lstrip("#")
+            r, g, b = int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16)
+            point.format.fill.solid()
+            point.format.fill.fore_color.rgb = RGBColor(r, g, b)
+
+        return True
+
+    except Exception as e:
+        logger.error("Failed to create ACF category composition chart: %s", e)
+        return False
+
+
+def add_department_summary_chart(slide, vehicles: List[FleetVehicle],
+                                  left: float = 1.5, top: float = 1.8,
+                                  width: float = 10.0, height: float = 5.2) -> bool:
+    """Horizontal stacked bar chart: vehicle count by department.
+
+    Only meaningful when department data is present in the CSV.
+    Bars are split into Mandate-Subject (Cat B) vs Other to show compliance exposure.
+    Returns False if no department data is found.
+    """
+    try:
+        dept_total: Dict[str, int] = {}
+        dept_b: Dict[str, int] = {}
+        for v in vehicles:
+            dept = (v.department or "").strip() or "Unassigned"
+            dept_total[dept] = dept_total.get(dept, 0) + 1
+            if v.custom_fields.get("_acf_code") == "B":
+                dept_b[dept] = dept_b.get(dept, 0) + 1
+
+        real_depts = {d for d in dept_total if d != "Unassigned"}
+        if not real_depts:
+            return False
+
+        sorted_depts = sorted(dept_total.items(), key=lambda x: x[1], reverse=True)[:15]
+        labels = [d for d, _ in sorted_depts]
+        b_vals   = [dept_b.get(d, 0) for d in labels]
+        other_vals = [dept_total[d] - dept_b.get(d, 0) for d in labels]
+
+        chart_data = CategoryChartData()
+        chart_data.categories = labels
+        chart_data.add_series("Mandate-Subject (Cat. B)", b_vals)
+        chart_data.add_series("Other Vehicles", other_vals)
+
+        chart = slide.shapes.add_chart(
+            XL_CHART_TYPE.BAR_STACKED,
+            Inches(left), Inches(top), Inches(width), Inches(height),
+            chart_data,
+        ).chart
+
+        _apply_clean_style(chart, legend_pos=XL_LEGEND_POSITION.BOTTOM,
+                           colors=[PRIMARY_HEX_1, "#A8C5DA"])
+        return True
+
+    except Exception as e:
+        logger.error("Failed to create department summary chart: %s", e)
+        return False
+
+
+def add_facility_summary_chart(slide, vehicles: List[FleetVehicle],
+                                left: float = 1.5, top: float = 1.8,
+                                width: float = 10.0, height: float = 5.2) -> bool:
+    """Horizontal stacked bar chart: vehicle count by facility/location.
+
+    Uses vehicle.location (maps from CSV aliases: facility, station, yard, depot, base).
+    Returns False if no location data is found.
+    """
+    try:
+        loc_total: Dict[str, int] = {}
+        loc_b: Dict[str, int] = {}
+        for v in vehicles:
+            loc = (getattr(v, "location", "") or "").strip()
+            if not loc:
+                continue
+            loc_total[loc] = loc_total.get(loc, 0) + 1
+            if v.custom_fields.get("_acf_code") == "B":
+                loc_b[loc] = loc_b.get(loc, 0) + 1
+
+        if not loc_total:
+            return False
+
+        sorted_locs = sorted(loc_total.items(), key=lambda x: x[1], reverse=True)[:15]
+        labels = [l for l, _ in sorted_locs]
+        b_vals     = [loc_b.get(l, 0) for l in labels]
+        other_vals = [loc_total[l] - loc_b.get(l, 0) for l in labels]
+
+        chart_data = CategoryChartData()
+        chart_data.categories = labels
+        chart_data.add_series("Mandate-Subject (Cat. B)", b_vals)
+        chart_data.add_series("Other Vehicles", other_vals)
+
+        chart = slide.shapes.add_chart(
+            XL_CHART_TYPE.BAR_STACKED,
+            Inches(left), Inches(top), Inches(width), Inches(height),
+            chart_data,
+        ).chart
+
+        _apply_clean_style(chart, legend_pos=XL_LEGEND_POSITION.BOTTOM,
+                           colors=[PRIMARY_HEX_1, "#A8C5DA"])
+        return True
+
+    except Exception as e:
+        logger.error("Failed to create facility summary chart: %s", e)
         return False
 
 
