@@ -18,9 +18,9 @@ from dataclasses import dataclass, field
 import pandas as pd
 import re
 
-from settings import MAX_THREADS, COLUMN_NAME_MAP, ALL_FUEL_ECONOMY_FIELDS, ADDITIONAL_DATA_MAPPINGS
+from settings import MAX_THREADS, COLUMN_NAME_MAP, ALL_FUEL_ECONOMY_FIELDS, ADDITIONAL_DATA_MAPPINGS, PROFILE_SIDECAR_SUFFIX, DEFAULT_SLIDE_IDS
 from utils import safe_cast, validate_vin, validate_vin_detailed, timestamp, ErrorCommunicator, ContextHelp
-from data.models import FleetVehicle, VehicleIdentification, FuelEconomyData, Fleet
+from data.models import FleetVehicle, VehicleIdentification, FuelEconomyData, Fleet, PresentationProfile
 from data.providers import VehicleDataProvider
 
 from commercial_vehicle_scraper import EnhancedCommercialVehicleProvider
@@ -657,6 +657,18 @@ class ProcessingPipeline:
         # Track VIN order for preserving input order in results
         self.vin_order = []
         self.vin_to_index = {}
+
+        # Vehicle reference database — analyst-sourced MPG lookup.
+        # Sits between the commercial scraper and the EPA class-average fallback.
+        # Two SQLite connections to the same file are safe here: the UI db_manager
+        # (opened in MainWindow) only writes; this pipeline connection only reads.
+        try:
+            from data.vehicle_database import VehicleDatabaseManager
+            from settings import DEFAULT_DB_FILE
+            self.db_manager = VehicleDatabaseManager(DEFAULT_DB_FILE)
+        except Exception as _db_init_err:
+            logger.warning(f"Vehicle reference database unavailable during processing: {_db_init_err}")
+            self.db_manager = None
     
     def process(self, 
                log_callback: Optional[Callable[[str], None]] = None,
@@ -824,7 +836,51 @@ class ProcessingPipeline:
     def stop(self) -> None:
         """Stop the processing pipeline."""
         self.stop_event.set()
-    
+
+    def _apply_epa_class_average_mpg(self, vehicle: FleetVehicle) -> None:
+        """
+        Apply an EPA class-average MPG estimate when all real data sources failed.
+
+        Sets combined/city/highway MPG from a GVWR-keyed lookup table and marks
+        the data as estimated so analysts can see it's not measured data.
+        The vehicle gains a custom_field "EPA Class Est. MPG" with the class label
+        so users know which bucket was applied.
+
+        Only applies when:
+        - combined_mpg is still 0 after VIN decode + scraping
+        - GVWR in pounds is known (used to select the bucket)
+        - Fuel type is not electric/hydrogen (ZEVs need no MPG estimate)
+        """
+        from settings import EPA_CLASS_AVERAGE_MPG
+
+        # Skip ZEVs
+        fuel_lower = vehicle.vehicle_id.fuel_type.lower()
+        if any(kw in fuel_lower for kw in ("electric", "bev", "fuel cell", "hydrogen")):
+            return
+
+        gvwr_lbs = vehicle.vehicle_id.gvwr_pounds
+        if gvwr_lbs <= 0:
+            # GVWR unknown — cannot select a bucket; leave MPG at 0
+            return
+
+        # Find the matching GVWR bucket
+        for (low, high), entry in sorted(EPA_CLASS_AVERAGE_MPG.items()):
+            if low < gvwr_lbs <= high:
+                vehicle.fuel_economy.combined_mpg = entry["combined"]
+                vehicle.fuel_economy.city_mpg = entry["city"]
+                vehicle.fuel_economy.highway_mpg = entry["highway"]
+                vehicle.fuel_economy.mpg_source = "EPA Class Estimate"
+                vehicle.fuel_economy.mpg_is_estimate = True
+                vehicle.custom_fields["EPA Class Est. MPG"] = (
+                    f"{entry['combined']:.0f} mpg ({entry['label']})"
+                )
+                _label = f"{vehicle.vehicle_id.year} {vehicle.vehicle_id.make} {vehicle.vehicle_id.model}".strip()
+                logger.info(
+                    f"Applied EPA class-average MPG ({entry['combined']} combined) "
+                    f"to {_label or vehicle.vin} — GVWR {gvwr_lbs:,.0f} lbs → {entry['label']}"
+                )
+                return
+
     def _process_single_vin(self, vin: str) -> Tuple[bool, Dict[str, Any], Optional[FleetVehicle]]:
         """
         Process a single VIN and ALWAYS return a vehicle object (even for failures).
@@ -873,6 +929,39 @@ class ProcessingPipeline:
             vehicle.input_order_index = input_order_index
             vehicle.processing_success = True
             vehicle.processing_error = ""
+
+            # Tag MPG source when FuelEconomy.gov provided the data and
+            # the scraper didn't already tag a different source.
+            if vehicle.fuel_economy.combined_mpg > 0 and not vehicle.fuel_economy.mpg_source:
+                vehicle.fuel_economy.mpg_source = "FuelEconomy.gov"
+                vehicle.fuel_economy.mpg_is_estimate = False
+
+            # Tier 3b: User database lookup — analyst-sourced MPG for commercial vehicles.
+            # Inserted between the commercial scraper (Tier 3a) and the EPA class-average
+            # fallback (Tier 4).  Read-only; safe in ThreadPoolExecutor context because
+            # lookup_mpg holds no write lock and SQLite WAL mode allows concurrent reads.
+            if vehicle.fuel_economy.combined_mpg <= 0 and self.db_manager is not None:
+                try:
+                    db_result = self.db_manager.lookup_mpg(vehicle)
+                    if db_result:
+                        vehicle.fuel_economy.combined_mpg = db_result["combined"]
+                        vehicle.fuel_economy.city_mpg     = db_result["city"]
+                        vehicle.fuel_economy.highway_mpg  = db_result["highway"]
+                        vehicle.fuel_economy.mpg_source   = db_result["source"]
+                        vehicle.fuel_economy.mpg_is_estimate = False
+                        logger.info(
+                            f"DB lookup hit for {vehicle.vehicle_id.year} "
+                            f"{vehicle.vehicle_id.make} {vehicle.vehicle_id.model}: "
+                            f"{db_result['combined']} mpg"
+                        )
+                except Exception as _db_lookup_err:
+                    logger.warning(
+                        f"Vehicle DB lookup failed for {vehicle.vin}: {_db_lookup_err}"
+                    )
+
+            # Tier 4: EPA class-average fallback (last resort, flagged as estimate).
+            if vehicle.fuel_economy.combined_mpg <= 0:
+                self._apply_epa_class_average_mpg(vehicle)
 
             # Track fuel type mismatch (diesel VIN matched to gasoline MPG)
             if data.get("fuel_type_mismatch", False):
@@ -1157,10 +1246,18 @@ class ProcessingPipeline:
                 
             # Handle known fields with proper type conversion
             if standard_field == "odometer":
-                vehicle.odometer = safe_cast(value, float, 0.0)
-            
+                raw = safe_cast(value, float, 0.0)
+                if raw < 0:
+                    logger.warning(f"Negative odometer value ({raw}) clamped to 0")
+                    raw = 0.0
+                vehicle.odometer = raw
+
             elif standard_field == "annual_mileage":
-                vehicle.annual_mileage = safe_cast(value, float, 0.0)
+                raw = safe_cast(value, float, 0.0)
+                if raw < 0:
+                    logger.warning(f"Negative annual_mileage value ({raw}) clamped to 0")
+                    raw = 0.0
+                vehicle.annual_mileage = raw
             
             elif standard_field == "asset_id":
                 vehicle.asset_id = value
@@ -1354,9 +1451,59 @@ class BatchProcessor:
             logger.error(f"Error in processing pipeline: {e}")
             if log_callback:
                 log_callback(f"Error: {e}")
-            
+
             # Call done callback with empty list to signal completion
             if done_callback:
                 done_callback([])
         finally:
             self._done_event.set()
+
+
+###############################################################################
+# Presentation Profile Sidecar Helpers
+###############################################################################
+
+def load_presentation_profile(fleet_path: str) -> PresentationProfile:
+    """
+    Load a PresentationProfile from the sidecar JSON file next to fleet_path.
+    Returns a default PresentationProfile if the sidecar does not exist.
+    """
+    import json
+    sidecar = Path(fleet_path).with_suffix("").with_name(
+        Path(fleet_path).stem + PROFILE_SIDECAR_SUFFIX
+    )
+    if sidecar.exists():
+        try:
+            with open(sidecar, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            # Ensure included_slides defaults if missing
+            if not data.get("included_slides"):
+                data["included_slides"] = list(DEFAULT_SLIDE_IDS)
+            return PresentationProfile(**{
+                k: v for k, v in data.items()
+                if k in PresentationProfile.__dataclass_fields__
+            })
+        except Exception as e:
+            logger.warning(f"Failed to load presentation profile from {sidecar}: {e}")
+
+    profile = PresentationProfile()
+    profile.included_slides = list(DEFAULT_SLIDE_IDS)
+    return profile
+
+
+def save_presentation_profile(fleet_path: str, profile: PresentationProfile) -> bool:
+    """
+    Save a PresentationProfile as a sidecar JSON file next to fleet_path.
+    Returns True on success.
+    """
+    import json
+    sidecar = Path(fleet_path).with_suffix("").with_name(
+        Path(fleet_path).stem + PROFILE_SIDECAR_SUFFIX
+    )
+    try:
+        with open(sidecar, "w", encoding="utf-8") as f:
+            json.dump(profile.to_dict(), f, indent=2, default=str)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save presentation profile to {sidecar}: {e}")
+        return False

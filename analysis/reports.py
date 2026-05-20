@@ -132,11 +132,12 @@ class CsvReportGenerator(ReportGenerator):
 class ExcelReportGenerator(ReportGenerator):
     """Generate Excel reports from fleet data with charts and analysis."""
     
-    def generate(self, fleet: Union[Fleet, List[FleetVehicle]], 
+    def generate(self, fleet: Union[Fleet, List[FleetVehicle]],
                analysis: Optional[ElectrificationAnalysis] = None,
                charging: Optional[ChargingAnalysis] = None,
                emissions: Optional[EmissionsInventory] = None,
-               fields: Optional[List[str]] = None) -> bool:
+               fields: Optional[List[str]] = None,
+               timeline_options: Optional[dict] = None) -> bool:
         """
         Generate an Excel report with data, charts, and analysis.
         
@@ -217,7 +218,11 @@ class ExcelReportGenerator(ReportGenerator):
             if analysis and hasattr(analysis, 'fleet_cash_flows') and analysis.fleet_cash_flows:
                 self._create_tco_model_sheet(workbook, analysis, vehicles, title_format, header_format, cell_format, number_format)
 
-            self._create_replacement_schedule_sheet(workbook, vehicles, title_format, header_format, cell_format, number_format)
+            self._create_replacement_schedule_sheet(
+                workbook, vehicles,
+                title_format, header_format, cell_format, number_format,
+                timeline_options=timeline_options,
+            )
 
             self._create_summary_dashboard_sheet(workbook, vehicles, analysis, charging, emissions, title_format, header_format, cell_format, number_format)
 
@@ -1127,15 +1132,39 @@ class ExcelReportGenerator(ReportGenerator):
             ws.write(r, 0, lbl, label_fmt)
             ws.write_formula(r, 1, formula, fmt)
 
-    def _create_replacement_schedule_sheet(self, workbook, vehicles, title_format, header_format, cell_format, number_format):
-        """Create Replacement Schedule sheet — Gantt-style table."""
+    def _create_replacement_schedule_sheet(
+        self, workbook, vehicles, title_format, header_format, cell_format, number_format,
+        timeline_options: Optional[dict] = None,
+    ):
+        """Create Replacement Schedule sheet — Gantt-style table.
+
+        timeline_options: dict of {scenario_key: bool} indicating which scenario
+        year columns to append (from the Timelines to Include dialog).
+        """
+        from analysis.scenarios import get_scenario_year_assignments, PRESET_SCENARIOS
+
         ws = workbook.add_worksheet("Replacement Schedule")
         currency_fmt = workbook.add_format({'border': 1, 'num_format': '$#,##0'})
-        year_fmt = workbook.add_format({'border': 1, 'align': 'center', 'bg_color': '#D6EAF8'})
+        year_fmt     = workbook.add_format({'border': 1, 'align': 'center',
+                                            'bg_color': '#D6EAF8'})
+        override_fmt = workbook.add_format({'border': 1, 'align': 'center',
+                                            'bg_color': '#FFF3E0'})
+        yes_fmt      = workbook.add_format({'border': 1, 'align': 'center',
+                                            'bg_color': '#FFE0B2', 'bold': True})
 
         ws.merge_range('A1:F1', "Vehicle Replacement Schedule", title_format)
 
-        # Gather schedulable vehicles
+        # Compute scenario year assignments for selected timelines
+        active_scenarios: list = []
+        if timeline_options:
+            for key, selected in timeline_options.items():
+                if selected and key in PRESET_SCENARIOS:
+                    assignments = get_scenario_year_assignments(vehicles, key)
+                    active_scenarios.append(
+                        (PRESET_SCENARIOS[key].name, assignments)
+                    )
+
+        # Gather schedulable vehicles (keyed by vin for scenario lookup)
         scheduled = []
         for v in vehicles:
             ev_year = v.custom_fields.get('Proposed EV Year', '')
@@ -1149,6 +1178,7 @@ class ExcelReportGenerator(ReportGenerator):
                 dept = v.custom_fields.get('department', '')
                 ev_equiv = v.custom_fields.get('EV Equivalent', '')
                 ev_cost = float(v.custom_fields.get('_ev_purchase_price', 0) or 0)
+                is_override = v.custom_fields.get('EV Year Overridden', '') == 'Yes'
                 scheduled.append({
                     'vehicle': f"{v.vehicle_id.year or ''} {make} {model}".strip(),
                     'dept': dept,
@@ -1156,6 +1186,8 @@ class ExcelReportGenerator(ReportGenerator):
                     'ev_equiv': ev_equiv,
                     'ev_cost': ev_cost,
                     'vin': v.vin[:8] + '...' if v.vin else '',
+                    'vin_full': v.vin or '',
+                    'is_override': is_override,
                 })
 
         if not scheduled:
@@ -1167,8 +1199,9 @@ class ExcelReportGenerator(ReportGenerator):
         # Get year range
         all_years = sorted(set(s['ev_year'] for s in scheduled))
 
-        # Headers
-        base_headers = ["Vehicle", "VIN", "Department", "EV Equivalent", "Est. Cost"]
+        # Base headers + override flag column
+        base_headers = ["Vehicle", "VIN", "Department", "EV Equivalent",
+                        "Est. Cost", "Overridden?"]
         for col, h in enumerate(base_headers):
             ws.write(2, col, h, header_format)
         ws.set_column(0, 0, 25)
@@ -1176,35 +1209,56 @@ class ExcelReportGenerator(ReportGenerator):
         ws.set_column(2, 2, 18)
         ws.set_column(3, 3, 22)
         ws.set_column(4, 4, 14)
+        ws.set_column(5, 5, 12)
 
-        # Year columns
+        base_col_count = len(base_headers)
+
+        # Year columns (current/override timeline)
         for i, yr in enumerate(all_years):
-            col = len(base_headers) + i
+            col = base_col_count + i
             ws.write(2, col, str(yr), header_format)
             ws.set_column(col, col, 8)
+
+        # Scenario year columns — one per selected scenario
+        scen_col_start = base_col_count + len(all_years)
+        for scen_idx, (scen_name, _assignments) in enumerate(active_scenarios):
+            col = scen_col_start + scen_idx
+            ws.write(2, col, f"{scen_name} Year", header_format)
+            ws.set_column(col, col, 14)
 
         # Data rows
         for row_idx, s in enumerate(scheduled):
             row = 3 + row_idx
-            ws.write(row, 0, s['vehicle'], cell_format)
-            ws.write(row, 1, s['vin'], cell_format)
-            ws.write(row, 2, s['dept'], cell_format)
-            ws.write(row, 3, s['ev_equiv'], cell_format)
-            ws.write(row, 4, s['ev_cost'], currency_fmt)
+            cell_fmt = override_fmt if s['is_override'] else cell_format
 
-            # Mark the replacement year
+            ws.write(row, 0, s['vehicle'], cell_fmt)
+            ws.write(row, 1, s['vin'], cell_fmt)
+            ws.write(row, 2, s['dept'], cell_fmt)
+            ws.write(row, 3, s['ev_equiv'], cell_fmt)
+            ws.write(row, 4, s['ev_cost'], currency_fmt)
+            ws.write(row, 5, "Yes" if s['is_override'] else "",
+                     yes_fmt if s['is_override'] else cell_format)
+
+            # Mark the replacement year (highlight override rows)
             for i, yr in enumerate(all_years):
-                col = len(base_headers) + i
+                col = base_col_count + i
                 if yr == s['ev_year']:
-                    ws.write(row, col, "X", year_fmt)
+                    fmt = override_fmt if s['is_override'] else year_fmt
+                    ws.write(row, col, "X", fmt)
                 else:
                     ws.write(row, col, "", cell_format)
+
+            # Scenario year values (one column per selected scenario)
+            for scen_idx, (_scen_name, assignments) in enumerate(active_scenarios):
+                col = scen_col_start + scen_idx
+                scen_year = assignments.get(s['vin_full'], "—")
+                ws.write(row, col, scen_year, cell_format)
 
         # Summary row
         summary_row = 3 + len(scheduled) + 1
         ws.write(summary_row, 0, "Vehicles per year:", header_format)
         for i, yr in enumerate(all_years):
-            col = len(base_headers) + i
+            col = base_col_count + i
             count = sum(1 for s in scheduled if s['ev_year'] == yr)
             ws.write(summary_row, col, count, header_format)
 

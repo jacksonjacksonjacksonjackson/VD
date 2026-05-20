@@ -40,14 +40,17 @@ class ElectrificationScenario:
     """A single electrification timeline scenario with configurable parameters."""
     name: str                          # Display name (e.g., "Aggressive")
     end_year: int = 2040               # Final year of timeline
-    vehicle_filter: str = "all"        # "all", "acf_only", "medium_heavy_only"
+    vehicle_filter: str = "all"        # "all", "acf_only", "medium_heavy_only",
+                                       # "all_except_emergency"
     budget_per_year: float = 0.0       # Max $ per year (0 = unlimited)
     custom_weights: Optional[Dict[str, float]] = None  # Override scoring weights
     description: str = ""              # Human-readable description
+    include_light_duty: bool = False   # Include Cat A (light-duty exempt) vehicles
 
 
 # Preset scenario configurations
 PRESET_SCENARIOS = {
+    # ── Time-based presets (used by Present tab + PowerPoint export) ──────────
     "aggressive": ElectrificationScenario(
         name="Aggressive",
         end_year=2030,
@@ -72,7 +75,33 @@ PRESET_SCENARIOS = {
         vehicle_filter="acf_only",
         description="Replace only CARB ACF-subject vehicles by 2035",
     ),
+
+    # ── Scope-based presets (used by Analysis tab Scenario Comparison) ────────
+    "minimum_compliance": ElectrificationScenario(
+        name="Minimum Compliance",
+        end_year=2040,
+        vehicle_filter="acf_only",
+        include_light_duty=False,
+        description="Only ACF mandate-subject vehicles (Cat B: medium & heavy duty)",
+    ),
+    "all_except_emergency": ElectrificationScenario(
+        name="All Excl. Emergency",
+        end_year=2040,
+        vehicle_filter="all_except_emergency",
+        include_light_duty=True,
+        description="All vehicles except emergency (Cat A+B+C)",
+    ),
+    "whole_fleet": ElectrificationScenario(
+        name="Whole Fleet",
+        end_year=2040,
+        vehicle_filter="all",
+        include_light_duty=True,
+        description="Every vehicle in the fleet including emergency vehicles (Cat A+B+C+D)",
+    ),
 }
+
+# Keys for the three scope-based scenarios shown in the Analysis tab
+SCOPE_SCENARIO_KEYS = ("minimum_compliance", "all_except_emergency", "whole_fleet")
 
 
 ###############################################################################
@@ -95,6 +124,12 @@ def _filter_vehicles(
         return [
             v for v in vehicles
             if (v.vehicle_id.gvwr_pounds or 0) > 8500
+        ]
+    elif vehicle_filter == "all_except_emergency":
+        # Include Cat A, B, C — exclude Cat D (emergency) and ZEV
+        return [
+            v for v in vehicles
+            if v.custom_fields.get("_acf_code", "") not in ("D",)
         ]
     else:
         return vehicles
@@ -179,10 +214,14 @@ def run_scenario(
     schedulable = []
     for v in eligible:
         acf_code = v.custom_fields.get("_acf_code", "")
-        if acf_code in ("ZEV", "A", ""):
-            continue
+        if acf_code == "ZEV":
+            continue  # Already electric — nothing to plan
+        if acf_code == "":
+            continue  # Classification unavailable
         if not v.processing_success:
             continue
+        if acf_code == "A" and not scenario.include_light_duty:
+            continue  # Skip light-duty unless scenario explicitly requests it
         score = _score_vehicle(v, acf_code)
         schedulable.append((score, v))
 
@@ -199,38 +238,58 @@ def run_scenario(
 
     available_years = list(range(current_year + 1, end_year + 1))
     num_years = len(available_years)
-    target_per_year = math.ceil(len(schedulable) / num_years)
+    n = len(schedulable)
 
     # Assign vehicles to years
-    year_counts = {yr: 0 for yr in available_years}
     assignments = []  # (year, vehicle)
 
-    for _score, vehicle in schedulable:
-        assigned_year = None
+    if scenario.budget_per_year > 0:
+        # Budget-constrained path: greedy fill-from-start with floor-based
+        # per-year capacities (avoids the ceil overcount that left tail years
+        # empty when n is not a perfect multiple of num_years).
+        base = max(1, n // num_years)
+        extra = n % num_years if n >= num_years else n
+        capacities = {
+            yr: base + (1 if i < extra else 0)
+            for i, yr in enumerate(available_years)
+        }
+        year_counts = {yr: 0 for yr in available_years}
 
-        # Budget constraint check
-        if scenario.budget_per_year > 0:
+        for _score, vehicle in schedulable:
+            assigned_year = None
             ev_cost = _get_vehicle_ev_cost(vehicle)
             for yr in available_years:
                 year_spend = sum(
                     _get_vehicle_ev_cost(v)
                     for y, v in assignments if y == yr
                 )
-                if (year_counts[yr] < target_per_year and
+                if (year_counts[yr] < capacities[yr] and
                         year_spend + ev_cost <= scenario.budget_per_year):
                     assigned_year = yr
                     break
+            if assigned_year is None:
+                assigned_year = available_years[-1]
+            year_counts[assigned_year] += 1
+            assignments.append((assigned_year, vehicle))
+    else:
+        # No budget constraint: spread vehicles evenly across the full horizon
+        # using the same algorithm as assign_electrification_years().
+        if n <= num_years:
+            # Fewer (or equal) vehicles than years: linearly space across horizon.
+            for k, (_score, vehicle) in enumerate(schedulable):
+                idx = 0 if n == 1 else round(k * (num_years - 1) / (n - 1))
+                assignments.append((available_years[idx], vehicle))
         else:
-            for yr in available_years:
-                if year_counts[yr] < target_per_year:
-                    assigned_year = yr
-                    break
-
-        if assigned_year is None:
-            assigned_year = available_years[-1]
-
-        year_counts[assigned_year] += 1
-        assignments.append((assigned_year, vehicle))
+            # More vehicles than years: floor-based per-year capacity so all
+            # years are used rather than just the first ceil(n/Y) years.
+            base = n // num_years
+            extra = n % num_years
+            year_slots: List[int] = []
+            for i, yr in enumerate(available_years):
+                cap = base + (1 if i < extra else 0)
+                year_slots.extend([yr] * cap)
+            for (_score, vehicle), yr in zip(schedulable, year_slots):
+                assignments.append((yr, vehicle))
 
     # Build yearly metrics
     vehicles_per_year = {}
@@ -416,3 +475,42 @@ def compare_scenarios(
         "lowest_cost": lowest_cost,
         "fastest": fastest,
     }
+
+
+def get_scenario_year_assignments(
+    vehicles: List[FleetVehicle],
+    scenario_name: str,
+    fleet_type: str = "hpf",
+) -> Dict[str, str]:
+    """Return a {vin: year_str} mapping for every vehicle under a preset scenario.
+
+    Works on deep copies so the original fleet is never mutated.
+    Vehicles not eligible under the scenario's vehicle_filter are mapped to "—".
+
+    Args:
+        vehicles:     Fleet vehicles to evaluate.
+        scenario_name: Key from PRESET_SCENARIOS.
+        fleet_type:   CARB fleet classification for deadline lookup
+                      ("hpf", "non_hpf", or "state_agency").
+    """
+    import copy
+    from analysis.electrification_timeline import assign_electrification_years
+
+    scenario = PRESET_SCENARIOS.get(scenario_name)
+    if not scenario:
+        return {}
+
+    # Determine which VINs are in scope for this scenario's filter
+    eligible_vins = {v.vin for v in _filter_vehicles(vehicles, scenario.vehicle_filter)}
+
+    # Deep-copy to avoid mutating originals
+    copies = copy.deepcopy(vehicles)
+    assign_electrification_years(copies, end_year=scenario.end_year, fleet_type=fleet_type)
+
+    result: Dict[str, str] = {}
+    for vc in copies:
+        if vc.vin in eligible_vins:
+            result[vc.vin] = str(vc.custom_fields.get("Proposed EV Year", "N/A"))
+        else:
+            result[vc.vin] = "—"
+    return result

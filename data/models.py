@@ -212,24 +212,33 @@ class VehicleIdentification(BaseModel):
 @dataclass
 class FuelEconomyData(BaseModel):
     """Fuel economy data from FuelEconomy.gov API."""
-    
+
     # Key efficiency metrics
     city_mpg: float = 0.0
     highway_mpg: float = 0.0
     combined_mpg: float = 0.0
-    
+
+    # MPG data provenance — who provided this MPG value.
+    # Values: "" (unknown/API), "FuelEconomy.gov", "Fuelly (community)",
+    #         "EPA SmartWay", "Ford Commercial", "EPA Class Estimate", "Manual Override"
+    mpg_source: str = ""
+
+    # Whether the MPG value is an estimate rather than a measured/published figure.
+    # True for EPA class-average fallbacks.  False for API or scraper data.
+    mpg_is_estimate: bool = False
+
     # CO2 emissions
     co2_primary: float = 0.0  # g/mile
     co2_alt: float = 0.0  # g/mile for alternative fuel
-    
+
     # Alternative fuel data
     alt_fuel_type: str = ""
     alt_range: float = 0.0  # miles
-    
+
     # Other useful fields
     fuel_cost_primary: float = 0.0  # $ annual
     fuel_cost_alt: float = 0.0  # $ annual
-    
+
     # Raw data from API
     raw_data: Dict[str, Any] = field(default_factory=dict)
     
@@ -244,6 +253,11 @@ class FuelEconomyData(BaseModel):
         self.city_mpg = float(self.raw_data.get('city08', 0) or 0)
         self.highway_mpg = float(self.raw_data.get('highway08', 0) or 0)
         self.combined_mpg = float(self.raw_data.get('comb08', 0) or 0)
+
+        # Tag source when MPG comes from FuelEconomy.gov API
+        if self.combined_mpg > 0 and not self.mpg_source:
+            self.mpg_source = "FuelEconomy.gov"
+            self.mpg_is_estimate = False
         
         # CO2 data
         self.co2_primary = float(self.raw_data.get('co2TailpipeGpm', 0) or 0)
@@ -640,6 +654,8 @@ class FleetVehicle(BaseModel):
             "MPG City": self._fmt_mpg(self.fuel_economy.city_mpg),
             "MPG Highway": self._fmt_mpg(self.fuel_economy.highway_mpg),
             "MPG Combined": self._fmt_mpg(self.fuel_economy.combined_mpg),
+            "MPG Source": self.fuel_economy.mpg_source,
+            "MPG Estimated": "Yes" if self.fuel_economy.mpg_is_estimate else ("" if not self.fuel_economy.mpg_source else "No"),
             "CO2 emissions": self._fmt_number(self.fuel_economy.co2_primary, 1) if self.fuel_economy.co2_primary > 0 else "",
             "co2A": self._fmt_number(self.fuel_economy.co2_alt, 1) if self.fuel_economy.co2_alt > 0 else "",
             "rangeA": self._fmt_number(self.fuel_economy.alt_range) if self.fuel_economy.alt_range > 0 else "",
@@ -673,7 +689,9 @@ class FleetVehicle(BaseModel):
             # ACF compliance & electrification timeline (populated by processor)
             "ACF Category": self.custom_fields.get("ACF Category", ""),
             "ACF Detail": self.custom_fields.get("ACF Detail", ""),
+            "ACF Relevance": self.custom_fields.get("ACF Relevance", ""),
             "Proposed EV Year": self.custom_fields.get("Proposed EV Year", ""),
+            "EV Year Reason": self.custom_fields.get("EV Year Reason", ""),
 
             # Fuel type mismatch indicator (diesel VIN matched to gasoline MPG)
             "Fuel Type Mismatch": self.custom_fields.get("Fuel Type Mismatch", ""),
@@ -718,9 +736,9 @@ class FleetVehicle(BaseModel):
             if key not in result:
                 result[key] = str(value)
         
-        # Add custom fields
+        # Add custom fields (exclude internal implementation details)
         for key, value in self.custom_fields.items():
-            if key not in result:
+            if key not in result and not key.startswith("_"):
                 result[key] = str(value)
         
         return result
@@ -732,12 +750,14 @@ class FleetVehicle(BaseModel):
 @dataclass
 class Fleet(BaseModel):
     """Collection of vehicles with fleet-level metadata and analysis."""
-    
+
     name: str
     vehicles: List[FleetVehicle] = field(default_factory=list)
     creation_date: datetime.datetime = field(default_factory=datetime.datetime.now)
     last_modified: datetime.datetime = field(default_factory=datetime.datetime.now)
     notes: str = ""
+    fleet_type: str = "hpf"   # "hpf", "non_hpf", or "state_agency" — controls ACF deadlines
+    max_vehicles_per_year: int = 0  # 0 = no cap (auto even-spread); >0 = greedy-fill cap
     
     @property
     def size(self) -> int:
@@ -960,6 +980,18 @@ class ChargingAnalysis(BaseModel):
     max_power_required: float = 0.0  # kW
     recommended_layout: Dict[str, Any] = field(default_factory=dict)
     estimated_installation_cost: float = 0.0  # $
+
+    # Extended results (Phase 28)
+    hourly_load_kw: List[float] = field(default_factory=lambda: [0.0] * 24)
+    facility_breakdown: List[Dict[str, Any]] = field(default_factory=list)
+    daily_energy_kwh: float = 0.0
+    charging_hours: float = 0.0
+
+    # Utility rate fields (populated when rate section is applied)
+    state_code: str = ""
+    electricity_price_per_kwh: float = 0.0
+    demand_charge_per_kw_month: float = 0.0
+    estimated_annual_charging_cost: float = 0.0
 
 @dataclass
 class EmissionsInventory(BaseModel):
@@ -1328,8 +1360,51 @@ class DataQualityAnalysis(BaseModel):
     def _get_top_complete_fields(self) -> List[str]:
         """Get the top 5 most complete fields."""
         sorted_fields = sorted(
-            self.completeness_by_field.items(), 
-            key=lambda x: x[1], 
+            self.completeness_by_field.items(),
+            key=lambda x: x[1],
             reverse=True
         )
         return [f"{field} ({pct:.1f}%)" for field, pct in sorted_fields[:5]]
+
+
+###############################################################################
+# Presentation Profile
+###############################################################################
+
+@dataclass
+class PresentationProfile(BaseModel):
+    """Per-fleet presentation profile: client info, consultant contacts, content."""
+
+    # Client info
+    client_name: str = ""
+    meeting_date: str = ""               # e.g. "March 5th, 2026"
+    presentation_type: str = "Kickoff"   # Kickoff / Update 1 / Update 2 / Final
+
+    # Presenter (the analyst building the deck)
+    presenter_name: str = ""
+    presenter_title: str = ""
+    presenter_company: str = ""
+
+    # Partner 1 contact (e.g. utility partner)
+    partner_1_name: str = ""
+    partner_1_title: str = ""
+    partner_1_org: str = ""
+    partner_1_email: str = ""
+
+    # Partner 2 contact (optional)
+    partner_2_name: str = ""
+    partner_2_title: str = ""
+    partner_2_org: str = ""
+    partner_2_email: str = ""
+
+    # Editable consulting content (one item per element)
+    agenda_items: List[str] = field(default_factory=list)
+    data_needs_items: List[str] = field(default_factory=list)
+    next_steps_items: List[str] = field(default_factory=list)
+
+    # Slide selection & order
+    included_slides: List[str] = field(default_factory=list)   # ordered list of slide IDs
+    optional_slides: List[str] = field(default_factory=list)   # extra slides to append
+
+    # Template override (None = use DEFAULT_TEMPLATE_PATH)
+    template_path: Optional[str] = None

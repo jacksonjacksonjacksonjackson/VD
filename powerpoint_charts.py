@@ -618,7 +618,7 @@ def add_tco_comparison_chart(slide, vehicles: List[FleetVehicle],
                            colors=[SECONDARY_HEX_1, PRIMARY_HEX_3])
         try:
             chart.value_axis.has_title = True
-            chart.value_axis.axis_title.text_frame.text = "Annual Cost ($)"
+            chart.value_axis.axis_title.text_frame.text = "Total Cost ($)"
         except Exception:
             pass
         return True
@@ -822,6 +822,172 @@ def add_scenario_comparison_chart(slide, scenario_results: list,
 
     except Exception as e:
         logger.error(f"Failed to create scenario comparison chart: {e}")
+        return False
+
+
+###############################################################################
+# Scope-scenario line charts (Annual CO₂ trajectory + Cumulative Investment)
+###############################################################################
+
+def add_co2_trajectory_chart(
+    slide, scenario_results_list: list,
+    baseline_co2: float = 0.0,
+    left: float = 1.0, top: float = 1.8,
+    width: float = 10.0, height: float = 5.0,
+) -> bool:
+    """Add a LINE_MARKERS chart showing annual remaining fleet emissions by scenario.
+
+    Each series is one scope-based scenario (Minimum Compliance, All Excl. Emergency,
+    Whole Fleet).  A dashed baseline series shows no-electrification emissions.
+
+    Args:
+        scenario_results_list: list of scenario dicts from compare_scenarios()["scenarios"]
+        baseline_co2: annual baseline fleet CO₂ in MT CO₂e (flat line across all years)
+    """
+    try:
+        if not PPTX_AVAILABLE or not scenario_results_list:
+            return False
+
+        # Collect all years
+        all_years: set = set()
+        for r in scenario_results_list:
+            all_years.update(r.get("cumulative_co2_reduction", {}).keys())
+        if not all_years:
+            return False
+        years = sorted(all_years)
+        year_labels = [str(y) for y in years]
+
+        chart_data = CategoryChartData()
+        chart_data.categories = year_labels
+
+        # Baseline (flat)
+        chart_data.add_series(
+            "Baseline (No Electrification)",
+            [round(baseline_co2, 1)] * len(years)
+        )
+
+        # Per-scenario annual remaining emissions = baseline − cumulative_co2_reduction[yr]
+        for r in scenario_results_list:
+            if r.get("total_vehicles", 0) == 0:
+                continue
+            cum = r.get("cumulative_co2_reduction", {})
+            values = [round(max(0.0, baseline_co2 - cum.get(yr, 0)), 1) for yr in years]
+            chart_data.add_series(r["name"], values)
+
+        chart = slide.shapes.add_chart(
+            XL_CHART_TYPE.LINE_MARKERS,
+            Inches(left), Inches(top),
+            Inches(width), Inches(height),
+            chart_data,
+        ).chart
+
+        chart.has_title = True
+        chart.chart_title.text_frame.text = "Annual Fleet Emissions by Scenario"
+        chart.chart_title.text_frame.paragraphs[0].font.size = Pt(13)
+        chart.chart_title.text_frame.paragraphs[0].font.bold = True
+
+        chart.has_legend = True
+        chart.legend.position = XL_LEGEND_POSITION.BOTTOM
+        chart.legend.font.size = Pt(9)
+
+        try:
+            chart.value_axis.has_title = True
+            chart.value_axis.axis_title.text_frame.text = "Metric Tons CO₂e"
+            chart.value_axis.axis_title.text_frame.paragraphs[0].font.size = Pt(10)
+        except Exception:
+            pass
+
+        # Style series: baseline dashed grey, scenarios in brand colors
+        colors = ["#888888", PRIMARY_HEX_1, "#E64A19", "#1B5E20", "#7b52ab"]
+        for i, series in enumerate(chart.series):
+            c = colors[i % len(colors)]
+            r_v, g_v, b_v = tuple(int(c.lstrip("#")[j:j+2], 16) for j in (0, 2, 4))
+            series.format.line.color.rgb = RGBColor(r_v, g_v, b_v)
+            series.format.line.width = Pt(2.0 if i > 0 else 1.5)
+            try:
+                if i == 0:  # baseline dashed
+                    from pptx.oxml.ns import qn
+                    from lxml import etree
+                    ln = series.format.line._element
+                    dash = etree.SubElement(ln, qn("a:prstDash"))
+                    dash.set("val", "dash")
+            except Exception:
+                pass
+
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to create CO₂ trajectory chart: {e}")
+        return False
+
+
+def add_cumulative_investment_chart(
+    slide, scenario_results_list: list,
+    left: float = 1.0, top: float = 1.8,
+    width: float = 10.0, height: float = 5.0,
+) -> bool:
+    """Add a LINE_MARKERS chart showing cumulative fleet EV investment by scenario.
+
+    Args:
+        scenario_results_list: list of scenario dicts from compare_scenarios()["scenarios"]
+    """
+    try:
+        if not PPTX_AVAILABLE or not scenario_results_list:
+            return False
+
+        all_years: set = set()
+        for r in scenario_results_list:
+            all_years.update(r.get("cumulative_cost", {}).keys())
+        if not all_years:
+            return False
+        years = sorted(all_years)
+        year_labels = [str(y) for y in years]
+
+        chart_data = CategoryChartData()
+        chart_data.categories = year_labels
+
+        for r in scenario_results_list:
+            if r.get("total_vehicles", 0) == 0:
+                continue
+            cum = r.get("cumulative_cost", {})
+            # Scale to $M, round to 1 decimal
+            values = [round(cum.get(yr, 0) / 1_000_000, 2) for yr in years]
+            chart_data.add_series(r["name"], values)
+
+        chart = slide.shapes.add_chart(
+            XL_CHART_TYPE.LINE_MARKERS,
+            Inches(left), Inches(top),
+            Inches(width), Inches(height),
+            chart_data,
+        ).chart
+
+        chart.has_title = True
+        chart.chart_title.text_frame.text = "Cumulative Fleet Investment by Scenario"
+        chart.chart_title.text_frame.paragraphs[0].font.size = Pt(13)
+        chart.chart_title.text_frame.paragraphs[0].font.bold = True
+
+        chart.has_legend = True
+        chart.legend.position = XL_LEGEND_POSITION.BOTTOM
+        chart.legend.font.size = Pt(9)
+
+        try:
+            chart.value_axis.has_title = True
+            chart.value_axis.axis_title.text_frame.text = "$M (Cumulative)"
+            chart.value_axis.axis_title.text_frame.paragraphs[0].font.size = Pt(10)
+        except Exception:
+            pass
+
+        colors = [PRIMARY_HEX_1, "#E64A19", "#1B5E20", "#7b52ab", "#0077b6"]
+        for i, series in enumerate(chart.series):
+            c = colors[i % len(colors)]
+            r_v, g_v, b_v = tuple(int(c.lstrip("#")[j:j+2], 16) for j in (0, 2, 4))
+            series.format.line.color.rgb = RGBColor(r_v, g_v, b_v)
+            series.format.line.width = Pt(2.0)
+
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to create cumulative investment chart: {e}")
         return False
 
 

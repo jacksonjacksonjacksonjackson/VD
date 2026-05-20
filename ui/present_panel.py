@@ -1,8 +1,14 @@
 """
 present_panel.py
 
-Present panel for the Fleet Electrification Analyzer application.
-Provides UI for customizing and exporting PowerPoint presentations.
+Present tab (Tab 4) — client-facing PowerPoint export.
+Provides:
+  • Client/consultant profile form (saved as per-fleet sidecar JSON)
+  • Draggable, toggleable slide list (core + optional slides)
+  • Consulting content editor (agenda, data needs, next steps)
+  • Template browser
+  • Build Presentation button  →  export_presentation()
+  • Export as PDF button       →  export_pdf()
 """
 
 import os
@@ -10,1145 +16,866 @@ import platform
 import subprocess
 import logging
 import threading
+import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-from typing import Dict, List, Any, Optional, Callable
+from typing import Dict, List, Any, Optional
+
+try:
+    from PIL import Image as _PILImage, ImageTk as _ImageTk
+    _PIL_AVAILABLE = True
+except ImportError:
+    _PIL_AVAILABLE = False
 
 from settings import (
-    PRIMARY_HEX_1,
-    PRIMARY_HEX_2, 
-    PRIMARY_HEX_3,
-    SECONDARY_HEX_1,
-    SECONDARY_HEX_2
+    PRIMARY_HEX_1, PRIMARY_HEX_2, PRIMARY_HEX_3,
+    SECONDARY_HEX_1, SECONDARY_HEX_2,
+    TEMPLATE_SLIDE_IDS, DEFAULT_SLIDE_IDS, DEFAULT_TEMPLATE_PATH,
+    EXPORT_DIR, ASSETS_DIR,
 )
-from utils import SimpleTooltip, ProgressDialog, ScrollableFrame
-from powerpoint_export import export_prelim_deck
+from utils import SimpleTooltip, ScrollableFrame
+from data.models import PresentationProfile
+from powerpoint_export import export_presentation, export_pdf
 from ui.theme import Colors, Fonts, Spacing
-from powerpoint_customizer import (
-    PowerPointCustomizer, executive_summary_config, technical_analysis_config,
-    data_focused_config, timeline_focused_config, get_slide_selection_help
-)
 
-# Set up module logger
 logger = logging.getLogger(__name__)
+
+###############################################################################
+# Slide metadata (display names + types for all supported slides)
+###############################################################################
+
+_TEMPLATE_SLIDE_META = {
+    "cover":           {"name": "Cover Slide",                    "type": "Token"},
+    "agenda":          {"name": "Agenda",                         "type": "Static"},
+    "carb_overview":   {"name": "CARB / ACF Overview",            "type": "Static"},
+    "acf_scenarios":   {"name": "ACF Compliance Scenarios",       "type": "Static"},
+    "acf_exemptions":  {"name": "ACF Exemptions",                 "type": "Static"},
+    "key_findings":    {"name": "Key Findings",                   "type": "Data"},
+    "timeline_chart":  {"name": "Electrification Timeline Chart", "type": "Chart"},
+    "emissions_chart": {"name": "GHG Emissions Reduction",        "type": "Chart"},
+    "incentives":      {"name": "Incentives & Other Support",     "type": "Static"},
+    "data_needs":      {"name": "Data Needs",                     "type": "Editable"},
+    "next_steps":      {"name": "Next Steps",                     "type": "Editable"},
+    "contact":         {"name": "Contact Information",            "type": "Token"},
+    "appendix":        {"name": "Appendix (section break)",       "type": "Static"},
+    "infra_costs_chart": {"name": "Charging Infrastructure Costs", "type": "Chart"},
+    "tco_chart":       {"name": "Annual Marginal EV TCO",         "type": "Chart"},
+}
+
+_OPTIONAL_SLIDE_META = {
+    # ── Phase 24: new slides — pre-checked by default ─────────────────────────
+    "acf_composition":    {"name": "Fleet Composition by ACF Category",       "type": "Chart",    "default": True},
+    "timeline_moderate":  {"name": "Electrification Timeline — Moderate 2035","type": "Chart",    "default": True},
+    "timeline_current_plan": {"name": "Electrification Timeline — Current Plan", "type": "Chart", "default": True},
+    "invalid_vin":        {"name": "Vehicle Data Assumptions (if any)",        "type": "Data",     "default": True},
+    # ── Phase 24: new slides — optional ───────────────────────────────────────
+    "timeline_aggressive":   {"name": "Electrification Timeline — Aggressive 2030",   "type": "Chart",    "default": False},
+    "timeline_conservative": {"name": "Electrification Timeline — Conservative 2040", "type": "Chart",    "default": False},
+    "department_summary":    {"name": "Department Summary (if dept data in CSV)",      "type": "Chart",    "default": False},
+    "facility_summary":      {"name": "Domicile Facility Summary (if location in CSV)","type": "Chart",    "default": False},
+    # ── Phase 27: scenario comparison slides ──────────────────────────────────
+    "scenario_investment": {"name": "Cumulative Fleet Investment by Scenario", "type": "Chart",    "default": True},
+    # scenario_co2 is now the template emissions_chart slide (always present); redundant here
+    "scenario_co2":        {"name": "Annual Fleet Emissions by Scenario (duplicate)", "type": "Optional", "default": False},
+    # ── Phase 28: Milestone Option timeline ───────────────────────────────────
+    "timeline_milestone":  {"name": "Electrification Timeline — ZEV Milestone Option", "type": "Chart", "default": False},
+    # ── Existing optional slides ───────────────────────────────────────────────
+    "fleet_composition":       {"name": "Fleet Composition by Body Type",          "type": "Optional", "default": False},
+    "age_analysis":            {"name": "Fleet Age Distribution",                   "type": "Optional", "default": False},
+    "scenario_comparison":     {"name": "Scenario Comparison (line charts)",        "type": "Optional", "default": False},
+    "replacement_table":       {"name": "Priority Replacement Schedule",            "type": "Optional", "default": False},
+    "data_quality":            {"name": "Data Quality & Completeness",              "type": "Optional", "default": False},
+}
+
+_TYPE_COLOR = {
+    "Token":    "#E8F5E9",  # pale green
+    "Chart":    "#E3F2FD",  # pale blue
+    "Data":     "#FFF3E0",  # pale amber
+    "Editable": "#F3E5F5",  # pale purple
+    "Static":   "#FAFAFA",  # near-white
+    "Optional": "#FCE4EC",  # pale rose
+}
 
 class PresentPanel:
     """
-    Panel for PowerPoint presentation customization and export.
-    Allows users to select slides, configure charts, and export presentations.
+    Present tab panel — exports client-facing PowerPoint presentations using
+    a per-fleet profile and the bundled visual template.
     """
-    
+
     def __init__(self, parent_frame: ttk.Frame, sharing_data: dict):
-        """
-        Initialize the Present panel.
-        
-        Args:
-            parent_frame: Parent frame to contain this panel
-            sharing_data: Shared data dictionary for inter-panel communication
-        """
         self.parent_frame = parent_frame
         self.sharing_data = sharing_data
-        self.customizer = PowerPointCustomizer()
-        self.template_path = None
-        
-        # Get root window reference
         self.root = parent_frame.winfo_toplevel()
-        
-        # Create scrollable container
-        self._sf_main = ScrollableFrame(self.parent_frame)
-        self._sf_main.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        self.main_frame = self._sf_main.scrollable_frame
-        
-        # Initialize UI components
-        self._create_header()
-        self._create_details_section()
-        self._create_vehicle_filter_section()
-        self._create_preset_section()
-        self._create_customization_section()
-        self._create_scenario_section()
-        self._create_template_section()
-        self._create_preview_section()
-        self._create_export_section()
 
-        # Initialize data
-        self._update_slide_options()
-    
-    def _create_header(self):
-        """Create the header section with title and description."""
-        header_frame = ttk.Frame(self.main_frame)
-        header_frame.pack(fill=tk.X, pady=(0, 20))
-        
-        # Title
-        title_label = ttk.Label(
-            header_frame, 
-            text="PowerPoint Presentation Builder",
-            font=("Segoe UI", 16, "bold")
+        # State
+        self._fleet = None
+        self._fleet_path: Optional[str] = None
+        self._profile: Optional[PresentationProfile] = None
+        self._profile_dirty = False
+        self._last_pptx_path: Optional[str] = None
+        self._building = False
+
+        # Slide order state: list of slide_id strings (template + optional)
+        self._all_slide_rows: List[dict] = []  # {id, name, type, included}
+        self._gallery_check_vars: Dict[str, tk.BooleanVar] = {}
+        self._gallery_thumb_images: Dict[str, Any] = {}  # keep PIL refs alive
+
+        self._build_ui()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # UI construction
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        # Sticky action bar at the very top of parent_frame (not scrollable)
+        self._action_bar = ttk.Frame(self.parent_frame, padding=(8, 6))
+        self._action_bar.pack(fill=tk.X, side=tk.TOP)
+        self._build_action_bar(self._action_bar)
+
+        # Everything else scrolls
+        self._sf = ScrollableFrame(self.parent_frame)
+        self._sf.pack(fill=tk.BOTH, expand=True)
+        body = self._sf.scrollable_frame
+
+        self._build_profile_section(body)
+        self._build_slide_section(body)
+        self._build_content_section(body)
+        self._build_template_section(body)
+        self._build_output_section(body)
+
+    def _build_action_bar(self, parent: ttk.Frame) -> None:
+        ttk.Label(parent, text="Build Presentation", font=(Fonts.FAMILY_SANS, Fonts.SIZE_H2, Fonts.WEIGHT_BOLD)).pack(side=tk.LEFT, padx=(0, 12))
+        self._build_btn = ttk.Button(parent, text="⚡ Build Presentation",
+                                     command=self._on_build, state="disabled")
+        self._build_btn.pack(side=tk.LEFT, padx=4)
+        self._pdf_btn = ttk.Button(parent, text="📄 Export as PDF",
+                                   command=self._on_export_pdf, state="disabled")
+        self._pdf_btn.pack(side=tk.LEFT, padx=4)
+        self._status_lbl = ttk.Label(parent, text="Load a fleet to enable export",
+                                     foreground="gray")
+        self._status_lbl.pack(side=tk.LEFT, padx=12)
+
+    # ── Client Profile ────────────────────────────────────────────────────────
+
+    def _build_profile_section(self, parent: tk.Frame) -> None:
+        sec, body = self._collapsible_section(parent, "▼  Client Profile", expanded=True)
+        frm = ttk.Frame(body)
+        frm.pack(fill=tk.X, padx=8, pady=6)
+        frm.columnconfigure(1, weight=1)
+        frm.columnconfigure(3, weight=1)
+
+        self._pv: Dict[str, tk.StringVar] = {k: tk.StringVar() for k in [
+            "client_name", "meeting_date", "presentation_type",
+            "presenter_name", "presenter_title", "presenter_company",
+            "partner_1_name", "partner_1_title", "partner_1_org", "partner_1_email",
+            "partner_2_name", "partner_2_title", "partner_2_org", "partner_2_email",
+        ]}
+        # Default meeting date
+        self._pv["meeting_date"].set(datetime.datetime.now().strftime("%B %-d, %Y"))
+        self._pv["presentation_type"].set("Kickoff")
+
+        # Trace changes → mark dirty
+        for var in self._pv.values():
+            var.trace_add("write", lambda *_: self._mark_dirty())
+
+        row = 0
+        def _lbl(text, r, c, span=1):
+            ttk.Label(frm, text=text, font=(Fonts.FAMILY_SANS, Fonts.SIZE_BODY)).grid(
+                row=r, column=c, sticky="w", padx=4, pady=2, columnspan=span)
+
+        def _entry(var_key, r, c, width=28, colspan=1):
+            e = ttk.Entry(frm, textvariable=self._pv[var_key], width=width)
+            e.grid(row=r, column=c, sticky="ew", padx=4, pady=2, columnspan=colspan)
+            return e
+
+        # Row 0: client name + type
+        _lbl("Client / City Name:", row, 0)
+        _entry("client_name", row, 1)
+        _lbl("Type:", row, 2)
+        cb = ttk.Combobox(frm, textvariable=self._pv["presentation_type"], width=15,
+                          values=["Kickoff", "Update 1", "Update 2", "Update 3", "Final"],
+                          state="readonly")
+        cb.grid(row=row, column=3, sticky="w", padx=4, pady=2)
+        row += 1
+
+        # Row 1: date
+        _lbl("Meeting Date:", row, 0)
+        _entry("meeting_date", row, 1)
+        row += 1
+
+        # Separator
+        ttk.Separator(frm, orient="horizontal").grid(
+            row=row, column=0, columnspan=4, sticky="ew", pady=4)
+        row += 1
+
+        # Presenter rows
+        _lbl("Presenter Name:", row, 0)
+        _entry("presenter_name", row, 1)
+        _lbl("Title:", row, 2)
+        _entry("presenter_title", row, 3)
+        row += 1
+
+        _lbl("Company:", row, 0)
+        _entry("presenter_company", row, 1)
+        row += 1
+
+        ttk.Separator(frm, orient="horizontal").grid(
+            row=row, column=0, columnspan=4, sticky="ew", pady=4)
+        row += 1
+
+        _lbl("Partner 1 Name:", row, 0)
+        _entry("partner_1_name", row, 1)
+        _lbl("Title / Org:", row, 2)
+        _entry("partner_1_title", row, 3)
+        row += 1
+
+        _lbl("Partner 1 Email:", row, 0)
+        _entry("partner_1_email", row, 1)
+        _lbl("Organization:", row, 2)
+        _entry("partner_1_org", row, 3)
+        row += 1
+
+        ttk.Separator(frm, orient="horizontal").grid(
+            row=row, column=0, columnspan=4, sticky="ew", pady=4)
+        row += 1
+
+        _lbl("Partner 2 Name:", row, 0)
+        _entry("partner_2_name", row, 1)
+        _lbl("Title / Org:", row, 2)
+        _entry("partner_2_title", row, 3)
+        row += 1
+
+        _lbl("Partner 2 Email:", row, 0)
+        _entry("partner_2_email", row, 1)
+        _lbl("Organization:", row, 2)
+        _entry("partner_2_org", row, 3)
+        row += 1
+
+        save_btn = ttk.Button(frm, text="💾  Save Profile", command=self._on_save_profile)
+        save_btn.grid(row=row, column=0, columnspan=2, sticky="w", padx=4, pady=6)
+        self._profile_status_lbl = ttk.Label(frm, text="", foreground="gray")
+        self._profile_status_lbl.grid(row=row, column=2, columnspan=2, sticky="w")
+
+    # ── Slide Selection (card gallery) ────────────────────────────────────────
+
+    def _build_slide_section(self, parent: tk.Frame) -> None:
+        sec, body = self._collapsible_section(parent, "▼  Slide Selection", expanded=True)
+
+        hint = ttk.Label(body,
+                         text="Check slides to include in your presentation.  "
+                              "Template slides appear first; optional slides follow.",
+                         foreground="gray", font=(Fonts.FAMILY_SANS, Fonts.SIZE_SMALL))
+        hint.pack(anchor="w", padx=8, pady=(4, 2))
+
+        # Toolbar
+        btn_row = ttk.Frame(body)
+        btn_row.pack(fill=tk.X, padx=8, pady=(0, 4))
+        ttk.Button(btn_row, text="Check All",   command=self._check_all).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_row, text="Uncheck All", command=self._uncheck_all).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_row, text="Reset Order", command=self._reset_slide_order).pack(side=tk.RIGHT, padx=2)
+
+        # Scrollable canvas for card grid
+        gallery_outer = ttk.Frame(body)
+        gallery_outer.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        self._gallery_canvas = tk.Canvas(gallery_outer, bg="#F5F5F5",
+                                         highlightthickness=0, height=500)
+        vsb = ttk.Scrollbar(gallery_outer, orient="vertical",
+                            command=self._gallery_canvas.yview)
+        self._gallery_canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._gallery_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._gallery_inner = ttk.Frame(self._gallery_canvas)
+        self._gallery_cwin = self._gallery_canvas.create_window(
+            (0, 0), window=self._gallery_inner, anchor="nw")
+
+        self._gallery_inner.bind(
+            "<Configure>",
+            lambda e: self._gallery_canvas.configure(
+                scrollregion=self._gallery_canvas.bbox("all")))
+        self._gallery_canvas.bind(
+            "<Configure>",
+            lambda e: self._gallery_canvas.itemconfig(
+                self._gallery_cwin, width=e.width))
+        # Mousewheel scroll
+        self._gallery_canvas.bind(
+            "<MouseWheel>",
+            lambda e: self._gallery_canvas.yview_scroll(
+                -1 * (e.delta // 120), "units"))
+
+        self._populate_slide_tree()
+
+    def _populate_slide_tree(self) -> None:
+        """Build _all_slide_rows (template first, then optional) and refresh gallery."""
+        self._all_slide_rows = []
+
+        for sid in TEMPLATE_SLIDE_IDS:
+            meta = _TEMPLATE_SLIDE_META.get(sid, {"name": sid, "type": "Static"})
+            row = {"id": sid, "name": meta["name"], "type": meta["type"], "included": True}
+            self._all_slide_rows.append(row)
+
+        # Separator row
+        self._all_slide_rows.append({"id": "_sep", "name": "── Optional Add-On Slides ──",
+                                      "type": "Optional", "included": False})
+
+        for sid, meta in _OPTIONAL_SLIDE_META.items():
+            default_included = meta.get("default", False)
+            row = {"id": sid, "name": meta["name"], "type": meta["type"], "included": default_included}
+            self._all_slide_rows.append(row)
+
+        self._refresh_gallery()
+
+    def _refresh_gallery(self) -> None:
+        """Rebuild the card grid from self._all_slide_rows."""
+        if not hasattr(self, "_gallery_inner"):
+            return
+        # Destroy existing card widgets
+        for w in self._gallery_inner.winfo_children():
+            w.destroy()
+        self._gallery_check_vars.clear()
+        self._gallery_thumb_images.clear()
+
+        self._gallery_inner.columnconfigure(0, weight=1, minsize=180)
+        self._gallery_inner.columnconfigure(1, weight=1, minsize=180)
+
+        card_col = 0
+        card_row = 0
+        for row in self._all_slide_rows:
+            sid = row["id"]
+            if sid == "_sep":
+                # Full-width separator label between template and optional slides
+                sep_frame = ttk.Frame(self._gallery_inner)
+                sep_frame.grid(row=card_row, column=0, columnspan=2,
+                               sticky="ew", padx=8, pady=(14, 4))
+                ttk.Separator(sep_frame, orient="horizontal").pack(
+                    fill=tk.X, side=tk.TOP, pady=2)
+                ttk.Label(sep_frame, text="Optional Add-On Slides",
+                          foreground="gray",
+                          font=(Fonts.FAMILY_SANS, Fonts.SIZE_SMALL, "italic"),
+                          ).pack(anchor="w")
+                card_row += 1
+                card_col = 0
+                continue
+
+            self._create_slide_card(self._gallery_inner, row, card_row, card_col)
+            card_col += 1
+            if card_col >= 2:
+                card_col = 0
+                card_row += 1
+
+        self._gallery_canvas.yview_moveto(0)
+
+    def _create_slide_card(self, parent: ttk.Frame,
+                            row: dict, grid_row: int, grid_col: int) -> None:
+        """Create a single slide card and grid it into `parent`."""
+        sid       = row["id"]
+        type_name = row["type"]
+        bg_color  = _TYPE_COLOR.get(type_name, "#FAFAFA")
+
+        card = tk.Frame(parent, bg=bg_color, relief="solid", borderwidth=1,
+                        cursor="hand2", padx=4, pady=4)
+        card.grid(row=grid_row, column=grid_col, padx=6, pady=6, sticky="nsew")
+
+        # Thumbnail area (16:9 proportions)
+        THUMB_W, THUMB_H = 160, 90
+        thumb_canvas = tk.Canvas(card, width=THUMB_W, height=THUMB_H,
+                                 bg=bg_color, highlightthickness=1,
+                                 highlightbackground="#BDBDBD")
+        thumb_canvas.pack()
+
+        img = self._load_thumb_image(sid, THUMB_W, THUMB_H)
+        if img is not None:
+            self._gallery_thumb_images[sid] = img
+            thumb_canvas.create_image(THUMB_W // 2, THUMB_H // 2, image=img, anchor="center")
+        else:
+            # Colored placeholder with icon
+            thumb_canvas.create_rectangle(2, 2, THUMB_W - 2, THUMB_H - 2,
+                                          fill=bg_color, outline="#BDBDBD")
+            icon = {"Chart": "CH", "Token": "TK", "Static": "ST",
+                    "Data": "DT", "Editable": "ED", "Optional": "OPT"}.get(type_name, "SL")
+            thumb_canvas.create_text(THUMB_W // 2, THUMB_H // 2 - 8,
+                                     text=icon, font=("Calibri", 22, "bold"),
+                                     fill="#BDBDBD", anchor="center")
+            thumb_canvas.create_text(THUMB_W // 2, THUMB_H // 2 + 20,
+                                     text=row["name"][:28],
+                                     font=("Calibri", 7), fill="#9E9E9E", anchor="center")
+
+        # Checkbox + title row
+        var = tk.BooleanVar(value=row["included"])
+        self._gallery_check_vars[sid] = var
+
+        def _on_toggle(s=sid, v=var, r=row):
+            r["included"] = v.get()
+
+        chk_frame = tk.Frame(card, bg=bg_color)
+        chk_frame.pack(fill=tk.X, pady=(4, 0))
+        chk = tk.Checkbutton(chk_frame, variable=var, command=_on_toggle,
+                              bg=bg_color, activebackground=bg_color, cursor="hand2")
+        chk.pack(side=tk.LEFT)
+        name_lbl = tk.Label(chk_frame, text=row["name"], bg=bg_color,
+                             font=(Fonts.FAMILY_SANS, Fonts.SIZE_SMALL, "bold"),
+                             wraplength=130, justify="left", anchor="w")
+        name_lbl.pack(side=tk.LEFT, fill=tk.X)
+
+        # Type badge
+        badge = tk.Label(card, text=type_name, bg=bg_color,
+                          font=(Fonts.FAMILY_SANS, Fonts.SIZE_SMALL),
+                          foreground="#757575", anchor="e")
+        badge.pack(fill=tk.X)
+
+        # Clicking anywhere on the card toggles inclusion
+        def _card_click(event, v=var, r=row):
+            v.set(not v.get())
+            r["included"] = v.get()
+
+        for widget in (card, thumb_canvas, chk_frame, name_lbl, badge):
+            widget.bind("<Button-1>", _card_click)
+
+    def _load_thumb_image(self, sid: str, width: int, height: int):
+        """Load a pre-rendered thumbnail PNG for the slide, or return None."""
+        png_path = os.path.join(str(ASSETS_DIR), "slide_thumbnails", f"{sid}.png")
+        if not os.path.isfile(png_path) or not _PIL_AVAILABLE:
+            return None
+        try:
+            img = _PILImage.open(png_path).resize((width, height), _PILImage.LANCZOS)
+            return _ImageTk.PhotoImage(img)
+        except Exception:
+            return None
+
+    # ── Consulting content ────────────────────────────────────────────────────
+
+    def _build_content_section(self, parent: tk.Frame) -> None:
+        sec, body = self._collapsible_section(parent, "▶  Consulting Content", expanded=False)
+
+        for label, key in [
+            ("Agenda Items (one per line):", "agenda"),
+            ("Data Needs (one per line):", "data_needs"),
+            ("Next Steps (one per line):", "next_steps"),
+        ]:
+            ttk.Label(body, text=label, font=(Fonts.FAMILY_SANS, Fonts.SIZE_BODY)).pack(anchor="w", padx=8, pady=(6, 0))
+            frm = ttk.Frame(body)
+            frm.pack(fill=tk.X, padx=8, pady=(0, 4))
+            txt = tk.Text(frm, height=4, wrap="word",
+                          font=("Calibri", 10), relief="solid", borderwidth=1)
+            txt.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            sb = ttk.Scrollbar(frm, orient="vertical", command=txt.yview)
+            txt.configure(yscrollcommand=sb.set)
+            sb.pack(side=tk.RIGHT, fill=tk.Y)
+            setattr(self, f"_txt_{key}", txt)
+
+    # ── Template ──────────────────────────────────────────────────────────────
+
+    def _build_template_section(self, parent: tk.Frame) -> None:
+        sec, body = self._collapsible_section(parent, "▶  Template", expanded=False)
+        frm = ttk.Frame(body)
+        frm.pack(fill=tk.X, padx=8, pady=6)
+
+        self._tpl_var = tk.StringVar(value=DEFAULT_TEMPLATE_PATH)
+        ttk.Label(frm, text="Template file:").pack(side=tk.LEFT, padx=4)
+        self._tpl_lbl = ttk.Label(frm, textvariable=self._tpl_var,
+                                   foreground="gray", wraplength=380)
+        self._tpl_lbl.pack(side=tk.LEFT, padx=4, fill=tk.X, expand=True)
+        ttk.Button(frm, text="Browse…", command=self._browse_template).pack(side=tk.LEFT, padx=4)
+        ttk.Button(frm, text="Reset",   command=self._reset_template).pack(side=tk.LEFT, padx=2)
+
+    # ── Output ────────────────────────────────────────────────────────────────
+
+    def _build_output_section(self, parent: tk.Frame) -> None:
+        sec, body = self._collapsible_section(parent, "▶  Output", expanded=False)
+        frm = ttk.Frame(body)
+        frm.pack(fill=tk.X, padx=8, pady=6)
+
+        ttk.Label(frm, text="Save to:").pack(side=tk.LEFT, padx=4)
+        self._out_var = tk.StringVar(value=str(EXPORT_DIR))
+        ttk.Entry(frm, textvariable=self._out_var, width=40).pack(side=tk.LEFT, padx=4)
+        ttk.Button(frm, text="Browse…",
+                   command=self._browse_output).pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(frm, text="Filename:").pack(side=tk.LEFT, padx=(12, 4))
+        self._fname_var = tk.StringVar(value="presentation.pptx")
+        ttk.Entry(frm, textvariable=self._fname_var, width=28).pack(side=tk.LEFT, padx=4)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Collapsible section helper
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _collapsible_section(self, parent: tk.Frame, label: str,
+                              expanded: bool = True) -> tuple:
+        """Create a collapsible labeled section. Returns (header_frame, body_frame)."""
+        container = ttk.Frame(parent, relief="flat")
+        container.pack(fill=tk.X, padx=6, pady=4)
+
+        hdr = tk.Frame(container, bg=PRIMARY_HEX_1, cursor="hand2")
+        hdr.pack(fill=tk.X)
+        lbl_var = tk.StringVar(value=label)
+        lbl_widget = tk.Label(hdr, textvariable=lbl_var, bg=PRIMARY_HEX_1,
+                              fg="white", font=(Fonts.FAMILY_SANS, Fonts.SIZE_H3, Fonts.WEIGHT_BOLD),
+                              anchor="w", padx=8, pady=4)
+        lbl_widget.pack(fill=tk.X)
+
+        body = ttk.Frame(container, relief="solid", borderwidth=1)
+        if expanded:
+            body.pack(fill=tk.X)
+
+        def _toggle(event=None):
+            if body.winfo_ismapped():
+                body.pack_forget()
+                txt = label.replace("▼", "▶", 1)
+            else:
+                body.pack(fill=tk.X)
+                txt = label.replace("▶", "▼", 1)
+            lbl_var.set(txt)
+
+        hdr.bind("<Button-1>", _toggle)
+        lbl_widget.bind("<Button-1>", _toggle)
+
+        return hdr, body
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Slide gallery interactions
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _check_all(self) -> None:
+        for row in self._all_slide_rows:
+            if row["id"] != "_sep":
+                row["included"] = True
+        self._refresh_gallery()
+
+    def _uncheck_all(self) -> None:
+        for row in self._all_slide_rows:
+            if row["id"] not in ("_sep", "cover"):
+                row["included"] = False
+        self._refresh_gallery()
+
+    def _reset_slide_order(self) -> None:
+        """Restore default slide order (template first, then optional)."""
+        state = {r["id"]: r["included"] for r in self._all_slide_rows}
+        self._populate_slide_tree()
+        for row in self._all_slide_rows:
+            if row["id"] in state:
+                row["included"] = state[row["id"]]
+        self._refresh_gallery()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Profile helpers
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _mark_dirty(self) -> None:
+        self._profile_dirty = True
+
+    def load_profile(self, profile: PresentationProfile) -> None:
+        """Populate form fields from a PresentationProfile."""
+        self._profile = profile
+        mapping = {
+            "client_name":       profile.client_name,
+            "meeting_date":      profile.meeting_date,
+            "presentation_type": profile.presentation_type,
+            "presenter_name":    profile.presenter_name,
+            "presenter_title":   profile.presenter_title,
+            "presenter_company": profile.presenter_company,
+            "partner_1_name":    profile.partner_1_name,
+            "partner_1_title":   profile.partner_1_title,
+            "partner_1_org":     profile.partner_1_org,
+            "partner_1_email":   profile.partner_1_email,
+            "partner_2_name":    profile.partner_2_name,
+            "partner_2_title":   profile.partner_2_title,
+            "partner_2_org":     profile.partner_2_org,
+            "partner_2_email":   profile.partner_2_email,
+        }
+        for key, val in mapping.items():
+            if val and key in self._pv:
+                self._pv[key].set(val or "")
+
+        # Restore consulting content text areas
+        for attr, items in [
+            ("_txt_agenda",     profile.agenda_items),
+            ("_txt_data_needs", profile.data_needs_items),
+            ("_txt_next_steps", profile.next_steps_items),
+        ]:
+            txt = getattr(self, attr, None)
+            if txt and items:
+                txt.delete("1.0", tk.END)
+                txt.insert("1.0", "\n".join(items))
+
+        # Restore slide inclusion / order
+        if profile.included_slides:
+            self._apply_profile_slides(profile)
+
+        # Template override
+        if profile.template_path:
+            self._tpl_var.set(profile.template_path)
+
+        self._profile_dirty = False
+        self._profile_status_lbl.configure(text="Profile loaded", foreground="gray")
+
+    def _apply_profile_slides(self, profile: PresentationProfile) -> None:
+        """Update slide inclusion and order from profile.included_slides."""
+        included_set = set(profile.included_slides)
+        optional_set = set(profile.optional_slides or [])
+
+        state_map: Dict[str, bool] = {}
+        for sid in TEMPLATE_SLIDE_IDS:
+            state_map[sid] = sid in included_set
+        for sid in _OPTIONAL_SLIDE_META:
+            state_map[sid] = sid in optional_set
+
+        for row in self._all_slide_rows:
+            if row["id"] in state_map:
+                row["included"] = state_map[row["id"]]
+
+        # Reorder template slides to match profile order
+        template_order = [sid for sid in profile.included_slides
+                          if sid in TEMPLATE_SLIDE_IDS]
+        optional_rows = [r for r in self._all_slide_rows
+                         if r["id"] not in TEMPLATE_SLIDE_IDS and r["id"] != "_sep"]
+        template_rows_map = {r["id"]: r for r in self._all_slide_rows
+                             if r["id"] in TEMPLATE_SLIDE_IDS}
+        new_template_rows = [template_rows_map[sid] for sid in template_order
+                             if sid in template_rows_map]
+        remaining = [r for r in self._all_slide_rows
+                     if r["id"] in TEMPLATE_SLIDE_IDS and r["id"] not in template_order]
+        sep = {"id": "_sep", "name": "── Optional Add-On Slides ──",
+               "type": "Optional", "included": False}
+        self._all_slide_rows = new_template_rows + remaining + [sep] + optional_rows
+        self._refresh_gallery()
+
+    def _read_profile(self) -> PresentationProfile:
+        """Build a PresentationProfile from the current form state."""
+        p = PresentationProfile()
+        for key in self._pv:
+            setattr(p, key, self._pv[key].get().strip())
+
+        def _lines(attr) -> List[str]:
+            txt = getattr(self, attr, None)
+            if not txt:
+                return []
+            content = txt.get("1.0", tk.END).strip()
+            return [l.strip() for l in content.splitlines() if l.strip()]
+
+        p.agenda_items     = _lines("_txt_agenda")
+        p.data_needs_items = _lines("_txt_data_needs")
+        p.next_steps_items = _lines("_txt_next_steps")
+
+        # Slide selection + order from Treeview
+        p.included_slides = [r["id"] for r in self._all_slide_rows
+                              if r["included"] and r["id"] in TEMPLATE_SLIDE_IDS]
+        p.optional_slides  = [r["id"] for r in self._all_slide_rows
+                               if r["included"] and r["id"] in _OPTIONAL_SLIDE_META]
+
+        tpl = self._tpl_var.get().strip()
+        p.template_path = tpl if tpl != DEFAULT_TEMPLATE_PATH else None
+
+        return p
+
+    def _on_save_profile(self) -> None:
+        """Save current profile to sidecar file."""
+        if not self._fleet_path:
+            messagebox.showinfo("Save Profile",
+                "Load a fleet file first. The profile is saved next to the fleet CSV.")
+            return
+        from data.processor import save_presentation_profile
+        profile = self._read_profile()
+        ok = save_presentation_profile(self._fleet_path, profile)
+        if ok:
+            self._profile_dirty = False
+            self._profile_status_lbl.configure(text="✓ Saved", foreground="green")
+            self.root.after(3000, lambda: self._profile_status_lbl.configure(
+                text="", foreground="gray"))
+        else:
+            messagebox.showerror("Save Failed", "Could not save profile. Check file permissions.")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Template / output browsing
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _browse_template(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Select PowerPoint Template",
+            filetypes=[("PowerPoint", "*.pptx *.potx"), ("All files", "*.*")],
         )
-        title_label.pack(anchor=tk.W)
-        
-        # Description
-        desc_label = ttk.Label(
-            header_frame,
-            text="Customize and export professional fleet electrification presentations with native PowerPoint charts",
-            font=("Segoe UI", 10),
-            foreground="#666666"
-        )
-        desc_label.pack(anchor=tk.W, pady=(5, 0))
-        
-        # Workflow indicator
-        workflow_frame = ttk.Frame(header_frame)
-        workflow_frame.pack(fill=tk.X, pady=(10, 0))
-        
-        workflow_label = ttk.Label(
-            workflow_frame,
-            text="Workflow: Process → Results → Analysis → Present",
-            font=("Segoe UI", 9, "italic"),
-            foreground="#888888"
-        )
-        workflow_label.pack(anchor=tk.W)
-    
-    def _create_details_section(self):
-        """Create editable presentation details: client name, subtitle, stage."""
-        details_frame = ttk.LabelFrame(self.main_frame, text="Presentation Details", padding=10)
-        details_frame.pack(fill=tk.X, pady=(0, 15))
+        if path:
+            self._tpl_var.set(path)
 
-        # Row 1: Client name
-        row1 = ttk.Frame(details_frame)
-        row1.pack(fill=tk.X, pady=2)
-        ttk.Label(row1, text="Client Name:", width=16, anchor=tk.W).pack(side=tk.LEFT)
-        self.client_name_var = tk.StringVar(value="")
-        ttk.Entry(row1, textvariable=self.client_name_var, width=50).pack(
-            side=tk.LEFT, padx=(5, 0), fill=tk.X, expand=True
-        )
+    def _reset_template(self) -> None:
+        self._tpl_var.set(DEFAULT_TEMPLATE_PATH)
 
-        # Row 2: Subtitle / context note
-        row2 = ttk.Frame(details_frame)
-        row2.pack(fill=tk.X, pady=2)
-        ttk.Label(row2, text="Subtitle:", width=16, anchor=tk.W).pack(side=tk.LEFT)
-        self.subtitle_var = tk.StringVar(value="Fleet Electrification Analysis")
-        ttk.Entry(row2, textvariable=self.subtitle_var, width=50).pack(
-            side=tk.LEFT, padx=(5, 0), fill=tk.X, expand=True
-        )
+    def _browse_output(self) -> None:
+        path = filedialog.askdirectory(title="Select Output Folder")
+        if path:
+            self._out_var.set(path)
 
-        # Row 3: Stage
-        row3 = ttk.Frame(details_frame)
-        row3.pack(fill=tk.X, pady=2)
-        ttk.Label(row3, text="Stage:", width=16, anchor=tk.W).pack(side=tk.LEFT)
-        self.stage_var = tk.StringVar(value="Preliminary Analysis")
-        stage_combo = ttk.Combobox(
-            row3, textvariable=self.stage_var, width=30,
-            values=["Preliminary Analysis", "Final Analysis", "Draft", "Revised"],
-            state="normal"
-        )
-        stage_combo.pack(side=tk.LEFT, padx=(5, 0))
+    def _get_out_path(self) -> str:
+        folder = self._out_var.get().strip() or str(EXPORT_DIR)
+        fname  = self._fname_var.get().strip() or "presentation.pptx"
+        if not fname.endswith(".pptx"):
+            fname += ".pptx"
+        return os.path.join(folder, fname)
 
-        hint = ttk.Label(
-            details_frame,
-            text="These fields appear on the cover slide and headers",
-            font=("Segoe UI", 9), foreground="#888888"
-        )
-        hint.pack(anchor=tk.W, pady=(5, 0))
+    # ─────────────────────────────────────────────────────────────────────────
+    # Build / PDF export
+    # ─────────────────────────────────────────────────────────────────────────
 
-    def _create_vehicle_filter_section(self):
-        """Create vehicle filter controls for subsetting which vehicles go into slides."""
-        filter_frame = ttk.LabelFrame(self.main_frame, text="Vehicle Filter (optional)", padding=10)
-        filter_frame.pack(fill=tk.X, pady=(0, 15))
-
-        # Department filter
-        dept_row = ttk.Frame(filter_frame)
-        dept_row.pack(fill=tk.X, pady=2)
-        ttk.Label(dept_row, text="Department:", width=16, anchor=tk.W).pack(side=tk.LEFT)
-        self.dept_filter_var = tk.StringVar(value="All Departments")
-        self.dept_filter_combo = ttk.Combobox(
-            dept_row, textvariable=self.dept_filter_var, width=35,
-            values=["All Departments"], state="readonly"
-        )
-        self.dept_filter_combo.pack(side=tk.LEFT, padx=(5, 0))
-
-        # ACF category filter
-        acf_row = ttk.Frame(filter_frame)
-        acf_row.pack(fill=tk.X, pady=2)
-        ttk.Label(acf_row, text="ACF Category:", width=16, anchor=tk.W).pack(side=tk.LEFT)
-        self.acf_filter_var = tk.StringVar(value="All Categories")
-        self.acf_filter_combo = ttk.Combobox(
-            acf_row, textvariable=self.acf_filter_var, width=35,
-            values=["All Categories"], state="readonly"
-        )
-        self.acf_filter_combo.pack(side=tk.LEFT, padx=(5, 0))
-
-        # Payback filter
-        payback_row = ttk.Frame(filter_frame)
-        payback_row.pack(fill=tk.X, pady=2)
-        ttk.Label(payback_row, text="Max Payback:", width=16, anchor=tk.W).pack(side=tk.LEFT)
-        self.payback_filter_var = tk.StringVar(value="No Limit")
-        ttk.Combobox(
-            payback_row, textvariable=self.payback_filter_var, width=35,
-            values=["No Limit", "< 3 years", "< 5 years", "< 7 years", "< 10 years"],
-            state="readonly"
-        ).pack(side=tk.LEFT, padx=(5, 0))
-
-        # Filter summary label
-        self.filter_summary_label = ttk.Label(
-            filter_frame, text="", font=("Segoe UI", 9), foreground="#666666"
-        )
-        self.filter_summary_label.pack(anchor=tk.W, pady=(5, 0))
-
-    def _get_filtered_vehicles(self):
-        """Return the subset of fleet vehicles that pass current filter settings."""
-        fleet_data = self.sharing_data.get('fleet')
-        if not fleet_data or not hasattr(fleet_data, 'vehicles'):
-            return []
-
-        vehicles = list(fleet_data.vehicles)
-
-        # Department filter
-        dept = self.dept_filter_var.get()
-        if dept and dept != "All Departments":
-            vehicles = [
-                v for v in vehicles
-                if getattr(v, 'custom_fields', {}).get('Department', '') == dept
-                or getattr(v, 'fleet_management_fields', {}).get('department', '') == dept
-            ]
-
-        # ACF category filter
-        acf = self.acf_filter_var.get()
-        if acf and acf != "All Categories":
-            vehicles = [
-                v for v in vehicles
-                if getattr(v, 'custom_fields', {}).get('ACF Category', '') == acf
-            ]
-
-        # Payback filter
-        payback = self.payback_filter_var.get()
-        if payback and payback != "No Limit":
-            try:
-                max_years = int(payback.split("<")[1].split("year")[0].strip())
-                filtered = []
-                for v in vehicles:
-                    pb = getattr(v, 'custom_fields', {}).get('_payback_years')
-                    if pb is not None and pb < max_years:
-                        filtered.append(v)  # only include vehicles that actually meet the threshold
-                vehicles = filtered
-            except (ValueError, IndexError):
-                pass
-
-        return vehicles
-
-    def _populate_filter_dropdowns(self):
-        """Populate department and ACF filter dropdowns from current fleet data."""
-        fleet_data = self.sharing_data.get('fleet')
-        if not fleet_data or not hasattr(fleet_data, 'vehicles'):
+    def _on_build(self) -> None:
+        if self._building:
+            return
+        fleet = self.sharing_data.get("fleet")
+        if not fleet or not getattr(fleet, "vehicles", None):
+            messagebox.showwarning("No Fleet", "Load a fleet before building the presentation.")
             return
 
-        departments = set()
-        acf_categories = set()
-        for v in fleet_data.vehicles:
-            cf = getattr(v, 'custom_fields', {})
-            dept = cf.get('Department', '') or getattr(v, 'fleet_management_fields', {}).get('department', '')
-            if dept:
-                departments.add(dept)
-            acf = cf.get('ACF Category', '')
-            if acf:
-                acf_categories.add(acf)
+        profile  = self._read_profile()
+        out_path = self._get_out_path()
+        tpl      = self._tpl_var.get().strip()
 
-        self.dept_filter_combo['values'] = ["All Departments"] + sorted(departments)
-        self.acf_filter_combo['values'] = ["All Categories"] + sorted(acf_categories)
+        # Auto-update filename from client + type
+        if profile.client_name:
+            slug = profile.client_name.replace(" ", "_")[:25]
+            ptype = (profile.presentation_type or "Kickoff").replace(" ", "_")
+            ts = datetime.datetime.now().strftime("%Y%m%d")
+            self._fname_var.set(f"{slug}_{ptype}_{ts}.pptx")
+            out_path = self._get_out_path()
 
-    def _create_preset_section(self):
-        """Create the preset configuration section."""
-        preset_frame = ttk.LabelFrame(self.main_frame, text="Quick Start - Preset Configurations", padding=10)
-        preset_frame.pack(fill=tk.X, pady=(0, 15))
-        
-        # Preset buttons
-        button_frame = ttk.Frame(preset_frame)
-        button_frame.pack(fill=tk.X)
-        
-        presets = [
-            ("Executive Summary", "executive_summary", "5 slides - High-level overview for leadership"),
-            ("Technical Analysis", "technical_analysis", "10 slides - Comprehensive technical analysis"),
-            ("Data-Focused", "data_focused", "7 slides - Emphasis on data quality and automated analysis"),
-            ("Timeline-Focused", "timeline_focused", "6 slides - Focus on electrification timelines")
-        ]
-        
-        for i, (name, preset_id, description) in enumerate(presets):
-            btn_frame = ttk.Frame(button_frame)
-            btn_frame.pack(fill=tk.X, pady=2)
-            
-            btn = ttk.Button(
-                btn_frame,
-                text=name,
-                command=lambda p=preset_id: self._apply_preset(p),
-                width=20
-            )
-            btn.pack(side=tk.LEFT, padx=(0, 10))
-            
-            desc_label = ttk.Label(
-                btn_frame,
-                text=description,
-                font=("Segoe UI", 9),
-                foreground="#666666"
-            )
-            desc_label.pack(side=tk.LEFT, anchor=tk.W)
-            
-            # Add tooltip
-            SimpleTooltip(btn, f"Apply {name} preset configuration")
-    
-    def _create_customization_section(self):
-        """Create the custom slide selection section."""
-        custom_frame = ttk.LabelFrame(self.main_frame, text="Custom Slide Selection", padding=10)
-        custom_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
-        
-        # Instructions
-        instructions = ttk.Label(
-            custom_frame,
-            text="Select which slides to include in your presentation:",
-            font=("Segoe UI", 10, "bold")
-        )
-        instructions.pack(anchor=tk.W, pady=(0, 10))
-        
-        # Create scrollable frame for slide options
-        sf_slides = ScrollableFrame(custom_frame)
-        sf_slides.pack(fill=tk.BOTH, expand=True)
-        sf_slides.canvas.configure(height=200)
+        self._building = True
+        self._build_btn.configure(state="disabled", text="Building…")
+        self._set_status("Building presentation…", color="blue")
 
-        # Store references
-        self.slides_frame = sf_slides.scrollable_frame
-        self.slide_checkboxes = {}
-        
-        # Selection controls
-        controls_frame = ttk.Frame(custom_frame)
-        controls_frame.pack(fill=tk.X, pady=(10, 0))
-        
-        ttk.Button(
-            controls_frame,
-            text="Select All",
-            command=self._select_all_slides,
-            width=12
-        ).pack(side=tk.LEFT, padx=(0, 5))
-        
-        ttk.Button(
-            controls_frame,
-            text="Clear All",
-            command=self._clear_all_slides,
-            width=12
-        ).pack(side=tk.LEFT, padx=(0, 5))
-        
-        ttk.Button(
-            controls_frame,
-            text="Validate Selection",
-            command=self._validate_current_selection,
-            width=15
-        ).pack(side=tk.LEFT, padx=(0, 5))
-        
-        # Validation feedback
-        self.validation_label = ttk.Label(
-            controls_frame,
-            text="",
-            font=("Segoe UI", 9),
-            foreground="#666666"
-        )
-        self.validation_label.pack(side=tk.LEFT, padx=(10, 0))
-    
-    def _create_scenario_section(self):
-        """Create scenario selector for the Scenario Comparison slide.
+        scenario_results = self.sharing_data.get("scenario_results")
 
-        Lets consultants choose which of the 4 preset scenarios to include,
-        and optionally define a custom scenario with a target end year,
-        annual budget cap, and vehicle filter.
-        """
-        self._scenario_section_frame = ttk.LabelFrame(
-            self.main_frame,
-            text="Scenario Comparison — Select Scenarios to Include",
-            padding=10
-        )
-        self._scenario_section_frame.pack(fill=tk.X, pady=(0, 15))
+        def _worker():
+            try:
+                result = export_presentation(
+                    fleet_data=fleet,
+                    profile=profile,
+                    out_path=out_path,
+                    template_path=tpl if os.path.isfile(tpl) else None,
+                    scenario_results=scenario_results,
+                )
+                # Support both old (str) and new (dict) return formats
+                if isinstance(result, dict):
+                    self.root.after(0, lambda: self._on_build_done(
+                        result["path"], result))
+                else:
+                    self.root.after(0, lambda: self._on_build_done(result))
+            except Exception as exc:
+                logger.exception("Presentation export failed")
+                msg = str(exc)
+                self.root.after(0, lambda m=msg: self._on_build_error(m))
 
-        hint = ttk.Label(
-            self._scenario_section_frame,
-            text="Choose which electrification scenarios appear on the Scenario Comparison slide.\n"
-                 "At least one scenario must be selected. (Only applies when that slide is included.)",
-            font=("Segoe UI", 9),
-            foreground="#555555",
-            justify=tk.LEFT,
-            wraplength=600,
-        )
-        hint.pack(anchor=tk.W, pady=(0, 8))
+        threading.Thread(target=_worker, daemon=True).start()
 
-        # Scenario definitions: (display_name, scenario_key, description)
-        SCENARIO_DEFS = [
-            ("Aggressive (2030)",      "aggressive",      "Replace all eligible vehicles by 2030 — maximum speed"),
-            ("Moderate (2035)",        "moderate",        "Balanced timeline, most fleets use this as their baseline"),
-            ("Conservative (2040)",    "conservative",    "Gradual transition — minimises annual budget impact"),
-            ("ACF Compliance Only",    "acf_compliance",  "Targets only CARB-regulated vehicles; ignores light-duty"),
-        ]
+    def _on_build_done(self, path: str, stats: dict = None) -> None:
+        self._building = False
+        self._last_pptx_path = path
+        self._build_btn.configure(state="normal", text="⚡ Build Presentation")
+        self._pdf_btn.configure(state="normal")
+        self._set_status(f"✓ Saved: {os.path.basename(path)}", color="green")
 
-        self._scenario_vars: dict = {}
-        checkboxes_frame = ttk.Frame(self._scenario_section_frame)
-        checkboxes_frame.pack(fill=tk.X)
+        # Build summary message
+        summary = f"Presentation saved to:\n{path}"
+        if stats:
+            total = stats.get("total_slides", "?")
+            charts_ok = stats.get("charts_succeeded", "?")
+            charts_total = stats.get("charts_attempted", "?")
+            optional = stats.get("optional_slides_added", 0)
+            summary += f"\n\n{total} slides generated"
+            summary += f"\n{charts_ok}/{charts_total} charts rendered"
+            if optional:
+                summary += f"\n{optional} optional slides added"
+            if charts_ok != charts_total:
+                summary += "\n\nNote: Some charts could not be rendered (check logs for details)"
 
-        for key, (display_name, scenario_key, description) in enumerate(SCENARIO_DEFS):
-            row_frame = ttk.Frame(checkboxes_frame)
-            row_frame.pack(fill=tk.X, pady=2)
+        if messagebox.askyesno("Export Complete", f"{summary}\n\nOpen now?"):
+            self._open_file(path)
 
-            var = tk.BooleanVar(value=True)  # all selected by default
-            self._scenario_vars[scenario_key] = var
+    def _on_build_error(self, msg: str) -> None:
+        self._building = False
+        self._build_btn.configure(state="normal", text="⚡ Build Presentation")
+        self._set_status("✗ Export failed", color="red")
+        messagebox.showerror("Export Failed", f"Could not build presentation:\n\n{msg}")
 
-            cb = ttk.Checkbutton(
-                row_frame,
-                text=display_name,
-                variable=var,
-                command=self._on_scenario_selection_changed,
-                width=22,
-            )
-            cb.pack(side=tk.LEFT)
+    def _on_export_pdf(self) -> None:
+        if not self._last_pptx_path:
+            messagebox.showinfo("No PPTX", "Build a presentation first, then export as PDF.")
+            return
+        self._set_status("Converting to PDF…", color="blue")
 
-            desc_lbl = ttk.Label(
-                row_frame,
-                text=f"— {description}",
-                font=("Segoe UI", 9),
-                foreground="#666666",
-            )
-            desc_lbl.pack(side=tk.LEFT, padx=(5, 0))
+        def _worker():
+            pdf_path = export_pdf(self._last_pptx_path)
+            self.root.after(0, lambda: self._on_pdf_done(pdf_path))
 
-        # ── Custom scenario row ──────────────────────────────────────────────────
-        separator = ttk.Separator(self._scenario_section_frame, orient=tk.HORIZONTAL)
-        separator.pack(fill=tk.X, pady=(8, 6))
+        threading.Thread(target=_worker, daemon=True).start()
 
-        custom_row = ttk.Frame(self._scenario_section_frame)
-        custom_row.pack(fill=tk.X, pady=2)
-
-        self._custom_scenario_var = tk.BooleanVar(value=False)
-        custom_cb = ttk.Checkbutton(
-            custom_row,
-            text="Custom Scenario",
-            variable=self._custom_scenario_var,
-            command=self._on_custom_scenario_toggled,
-            width=22,
-        )
-        custom_cb.pack(side=tk.LEFT)
-
-        ttk.Label(
-            custom_row,
-            text="— Define your own target year, budget, and vehicle scope",
-            font=("Segoe UI", 9),
-            foreground="#666666",
-        ).pack(side=tk.LEFT, padx=(5, 0))
-
-        # Controls sub-frame (hidden until checkbox is ticked)
-        self._custom_scenario_frame = ttk.Frame(self._scenario_section_frame)
-
-        # Row 1: End Year + Annual Budget
-        params_row = ttk.Frame(self._custom_scenario_frame)
-        params_row.pack(fill=tk.X, pady=(6, 2))
-
-        ttk.Label(params_row, text="End Year:").pack(side=tk.LEFT)
-        self._custom_end_year_var = tk.IntVar(value=2032)
-        end_year_spin = ttk.Spinbox(
-            params_row,
-            from_=2025, to=2060,
-            textvariable=self._custom_end_year_var,
-            width=7,
-        )
-        end_year_spin.pack(side=tk.LEFT, padx=(4, 20))
-
-        ttk.Label(params_row, text="Annual Budget Cap ($):").pack(side=tk.LEFT)
-        self._custom_budget_var = tk.StringVar(value="0")
-        budget_entry = ttk.Entry(params_row, textvariable=self._custom_budget_var, width=14)
-        budget_entry.pack(side=tk.LEFT, padx=(4, 4))
-        ttk.Label(
-            params_row, text="(0 = unlimited)",
-            font=("Segoe UI", 9), foreground="#888888",
-        ).pack(side=tk.LEFT)
-
-        # Row 2: Vehicle filter
-        filter_row = ttk.Frame(self._custom_scenario_frame)
-        filter_row.pack(fill=tk.X, pady=(2, 4))
-
-        ttk.Label(filter_row, text="Include:").pack(side=tk.LEFT)
-        self._custom_filter_var = tk.StringVar(value="All Vehicles")
-        filter_combo = ttk.Combobox(
-            filter_row,
-            textvariable=self._custom_filter_var,
-            values=["All Vehicles", "ACF Regulated Only", "Medium+Heavy Only"],
-            state="readonly",
-            width=24,
-        )
-        filter_combo.pack(side=tk.LEFT, padx=(4, 0))
-
-        # Validation label
-        self._scenario_validation_label = ttk.Label(
-            self._scenario_section_frame,
-            text="",
-            font=("Segoe UI", 9),
-            foreground="#CC3300",
-        )
-        self._scenario_validation_label.pack(anchor=tk.W, pady=(6, 0))
-
-    def _on_custom_scenario_toggled(self):
-        """Show or hide the custom scenario controls."""
-        if self._custom_scenario_var.get():
-            # Pack before the validation label (which is always the last child)
-            self._custom_scenario_frame.pack(fill=tk.X, padx=(26, 0),
-                                             before=self._scenario_validation_label)
+    def _on_pdf_done(self, pdf_path: Optional[str]) -> None:
+        if pdf_path and os.path.isfile(pdf_path):
+            self._set_status(f"✓ PDF: {os.path.basename(pdf_path)}", color="green")
+            if messagebox.askyesno("PDF Ready", f"PDF saved to:\n{pdf_path}\n\nOpen now?"):
+                self._open_file(pdf_path)
         else:
-            self._custom_scenario_frame.pack_forget()
-        self._on_scenario_selection_changed()
-
-    def _on_scenario_selection_changed(self):
-        """Validate that at least one scenario is selected."""
-        selected = [k for k, v in self._scenario_vars.items() if v.get()]
-        if self._custom_scenario_var.get():
-            selected.append("custom")
-        if not selected:
-            self._scenario_validation_label.configure(
-                text="⚠ At least one scenario must be selected."
+            self._set_status("PDF export unavailable", color="gray")
+            messagebox.showinfo(
+                "PDF Export",
+                "Automatic PDF conversion requires LibreOffice or the pptx2pdf package.\n\n"
+                "To install: pip install pptx2pdf\n\n"
+                "Or open the .pptx in PowerPoint and use File > Save as PDF.",
             )
+
+    def _set_status(self, msg: str, color: str = "gray") -> None:
+        self._status_lbl.configure(text=msg, foreground=color)
+
+    @staticmethod
+    def _open_file(path: str) -> None:
+        try:
+            if platform.system() == "Darwin":
+                subprocess.Popen(["open", path])
+            elif platform.system() == "Windows":
+                os.startfile(path)
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception:
+            pass
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Public API (called by main_window.py)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def refresh_data(self) -> None:
+        """Called by MainWindow after a fleet loads. Updates status and pre-fills fields."""
+        fleet = self.sharing_data.get("fleet")
+        if fleet and getattr(fleet, "vehicles", None):
+            n = len(fleet.vehicles)
+            self._fleet = fleet
+            self._build_btn.configure(state="normal")
+            self._set_status(f"Ready — {n} vehicles loaded", color="gray")
+
+            # Pre-fill client name from fleet name if field is blank
+            if not self._pv["client_name"].get().strip() and fleet.name:
+                # Clean up auto-generated fleet names
+                name = fleet.name.replace("Fleet Analysis - ", "").strip()
+                self._pv["client_name"].set(name)
+
+            # Auto-update output filename suggestion
+            client = self._pv["client_name"].get().strip()
+            ptype  = self._pv["presentation_type"].get().strip() or "Kickoff"
+            ts = datetime.datetime.now().strftime("%Y%m%d")
+            slug = (client or "Fleet").replace(" ", "_")[:25]
+            self._fname_var.set(f"{slug}_{ptype}_{ts}.pptx")
         else:
-            self._scenario_validation_label.configure(text="")
+            self._build_btn.configure(state="disabled")
+            self._set_status("Load a fleet to enable export", color="gray")
 
-    def _get_selected_scenarios(self) -> list:
-        """Return list of selected preset scenario keys; falls back to all if none checked."""
-        selected = [k for k, v in self._scenario_vars.items() if v.get()]
-        if not selected and not self._custom_scenario_var.get():
-            return ["aggressive", "moderate", "conservative", "acf_compliance"]
-        return selected
+    def set_fleet_path(self, path: Optional[str]) -> None:
+        """Called by MainWindow when a fleet CSV is opened. Used for sidecar profile save."""
+        self._fleet_path = path
 
-    def _get_custom_scenario(self):
-        """Return an ElectrificationScenario for the custom row, or None if not enabled."""
-        if not self._custom_scenario_var.get():
-            return None
-        from analysis.scenarios import ElectrificationScenario
-        try:
-            end_year = int(self._custom_end_year_var.get())
-        except (ValueError, tk.TclError):
-            end_year = 2032
-        try:
-            budget = float(self._custom_budget_var.get() or "0")
-        except ValueError:
-            budget = 0.0
-        filter_map = {
-            "All Vehicles":        "all",
-            "ACF Regulated Only":  "acf_only",
-            "Medium+Heavy Only":   "medium_heavy_only",
-        }
-        vehicle_filter = filter_map.get(self._custom_filter_var.get(), "all")
-        budget_desc = f", ${budget:,.0f}/yr cap" if budget > 0 else ", unlimited budget"
-        filter_desc = {"all": "", "acf_only": ", ACF only", "medium_heavy_only": ", M+H only"}.get(vehicle_filter, "")
-        return ElectrificationScenario(
-            name=f"Custom ({end_year}{filter_desc}{budget_desc})",
-            end_year=end_year,
-            budget_per_year=budget,
-            vehicle_filter=vehicle_filter,
-            description=f"User-defined scenario: replace by {end_year}{filter_desc}{budget_desc}",
-        )
-
-    def _create_template_section(self):
-        """Create the template selection section."""
-        template_frame = ttk.LabelFrame(self.main_frame, text="Presentation Template", padding=10)
-        template_frame.pack(fill=tk.X, pady=(0, 15))
-        
-        # Template selection
-        template_inner = ttk.Frame(template_frame)
-        template_inner.pack(fill=tk.X)
-        
-        ttk.Label(template_inner, text="Template:").pack(side=tk.LEFT)
-        
-        self.template_var = tk.StringVar(value="Default Template")
-        template_entry = ttk.Entry(
-            template_inner,
-            textvariable=self.template_var,
-            state="readonly",
-            width=50
-        )
-        template_entry.pack(side=tk.LEFT, padx=(10, 10), fill=tk.X, expand=True)
-        
-        ttk.Button(
-            template_inner,
-            text="Browse...",
-            command=self._browse_template,
-            width=12
-        ).pack(side=tk.RIGHT)
-        
-        # Template info
-        template_info = ttk.Label(
-            template_frame,
-            text="Upload a custom .potx template file for branded presentations, or use the default template",
-            font=("Segoe UI", 9),
-            foreground="#666666"
-        )
-        template_info.pack(anchor=tk.W, pady=(5, 0))
-    
-    def _create_preview_section(self):
-        """Create the preview section showing current configuration."""
-        preview_frame = ttk.LabelFrame(self.main_frame, text="Presentation Preview", padding=10)
-        preview_frame.pack(fill=tk.X, pady=(0, 15))
-        
-        # Preview text
-        self.preview_text = tk.Text(
-            preview_frame,
-            height=10,
-            width=80,
-            wrap=tk.WORD,
-            font=("Consolas", 9),
-            state=tk.DISABLED
-        )
-        self.preview_text.pack(fill=tk.X)
-        
-        # Preview controls
-        preview_controls = ttk.Frame(preview_frame)
-        preview_controls.pack(fill=tk.X, pady=(10, 0))
-        
-        ttk.Button(
-            preview_controls,
-            text="Refresh Preview",
-            command=self._update_preview,
-            width=15
-        ).pack(side=tk.LEFT)
-        
-        self.preview_status = ttk.Label(
-            preview_controls,
-            text="",
-            font=("Segoe UI", 9),
-            foreground="#666666"
-        )
-        self.preview_status.pack(side=tk.LEFT, padx=(10, 0))
-    
-    def _create_export_section(self):
-        """Create the export section with export button and options."""
-        export_frame = ttk.LabelFrame(self.main_frame, text="Export Presentation", padding=10)
-        export_frame.pack(fill=tk.X)
-        
-        # Export controls
-        controls_frame = ttk.Frame(export_frame)
-        controls_frame.pack(fill=tk.X)
-        
-        # Export button (PRIMARY GREEN - main action)
-        self.export_button = ttk.Button(
-            controls_frame,
-            text="📊 Generate PowerPoint",
-            command=self._export_presentation,
-            style="Primary.TButton"
-        )
-        self.export_button.pack(side=tk.LEFT, padx=(0, Spacing.MARGIN_ELEMENT))
-        SimpleTooltip(self.export_button, "Generate professional PowerPoint presentation\n• Editable native charts with real fleet data\n• Customized slides based on your selection\n• Ready for stakeholder presentations")
-        
-        # Export status
-        self.export_status = ttk.Label(
-            controls_frame,
-            text="Ready to export",
-            font=("Segoe UI", 10),
-            foreground="#666666"
-        )
-        self.export_status.pack(side=tk.LEFT)
-        
-        # Progress bar (initially hidden)
-        self.progress_var = tk.DoubleVar()
-        self.progress_bar = ttk.Progressbar(
-            export_frame,
-            variable=self.progress_var,
-            mode='determinate'
-        )
-        
-        # Export options
-        options_frame = ttk.Frame(export_frame)
-        options_frame.pack(fill=tk.X, pady=(10, 0))
-        
-        # Auto-open checkbox
-        self.auto_open_var = tk.BooleanVar(value=True)
-        auto_open_cb = ttk.Checkbutton(
-            options_frame,
-            text="Open presentation after export",
-            variable=self.auto_open_var
-        )
-        auto_open_cb.pack(side=tk.LEFT)
-        
-        # Format dropdown removed — only PowerPoint is supported
-    
-    def _update_slide_options(self):
-        """Update the slide selection checkboxes."""
-        # Clear existing checkboxes
-        for widget in self.slides_frame.winfo_children():
-            widget.destroy()
-        
-        self.slide_checkboxes.clear()
-        
-        # Get available slides
-        options = self.customizer.get_customization_options()
-        slides = options['slides']
-        
-        # Create checkboxes for each slide
-        for slide_id, slide_info in slides.items():
-            frame = ttk.Frame(self.slides_frame)
-            frame.pack(fill=tk.X, pady=2)
-            
-            # Checkbox variable
-            var = tk.BooleanVar()
-            if slide_id in self.customizer.config.get_selected_slides():
-                var.set(True)
-            
-            self.slide_checkboxes[slide_id] = var
-            
-            # Checkbox
-            cb = ttk.Checkbutton(
-                frame,
-                text=slide_info['name'],
-                variable=var,
-                command=self._on_slide_selection_changed
-            )
-            cb.pack(side=tk.LEFT, anchor=tk.W)
-            
-            # Required indicator
-            if slide_info.get('required', False):
-                req_label = ttk.Label(
-                    frame,
-                    text="(Required)",
-                    font=("Segoe UI", 8),
-                    foreground="#FF6B6B"
-                )
-                req_label.pack(side=tk.LEFT, padx=(5, 0))
-                # Disable required slides
-                cb.configure(state="disabled")
-            
-            # Description
-            desc_label = ttk.Label(
-                frame,
-                text=f" - {slide_info['description']}",
-                font=("Segoe UI", 9),
-                foreground="#666666"
-            )
-            desc_label.pack(side=tk.LEFT, padx=(10, 0))
-            
-            # Charts indicator
-            if slide_info.get('charts'):
-                chart_label = ttk.Label(
-                    frame,
-                    text=f"📊 {len(slide_info['charts'])} chart(s)",
-                    font=("Segoe UI", 8),
-                    foreground="#4ECDC4"
-                )
-                chart_label.pack(side=tk.RIGHT)
-    
-    def _apply_preset(self, preset_name: str):
-        """Apply a preset configuration."""
-        try:
-            success = self.customizer.apply_preset(preset_name)
-            if success:
-                self._update_slide_options()
-                self._update_preview()
-                self.export_status.configure(text=f"Applied {preset_name.replace('_', ' ').title()} preset")
-            else:
-                messagebox.showerror("Error", f"Failed to apply preset: {preset_name}")
-        except Exception as e:
-            logger.error(f"Failed to apply preset {preset_name}: {e}")
-            messagebox.showerror("Error", f"Failed to apply preset: {e}")
-    
-    def _on_slide_selection_changed(self):
-        """Handle slide selection changes."""
-        # Get current selection
-        selected_slides = [
-            slide_id for slide_id, var in self.slide_checkboxes.items() 
-            if var.get()
-        ]
-        
-        # Update customizer
-        self.customizer.customize_slides(selected_slides)
-        
-        # Update preview
-        self._update_preview()
-        
-        # Update validation
-        self._validate_current_selection()
-    
-    def _select_all_slides(self):
-        """Select all available slides."""
-        for var in self.slide_checkboxes.values():
-            var.set(True)
-        self._on_slide_selection_changed()
-    
-    def _clear_all_slides(self):
-        """Clear all slide selections (except required)."""
-        options = self.customizer.get_customization_options()
-        
-        for slide_id, var in self.slide_checkboxes.items():
-            slide_info = options['slides'].get(slide_id, {})
-            if not slide_info.get('required', False):
-                var.set(False)
-        
-        self._on_slide_selection_changed()
-    
-    def _validate_current_selection(self):
-        """Validate current slide selection and show feedback."""
-        selected_slides = [
-            slide_id for slide_id, var in self.slide_checkboxes.items() 
-            if var.get()
-        ]
-        
-        validation = self.customizer.validate_selection(selected_slides)
-        
-        # Update validation label
-        if validation['valid']:
-            status_text = f"✓ Valid selection: {validation['final_slide_count']} slides"
-            if validation['estimated_generation_time']:
-                status_text += f" (~{validation['estimated_generation_time']})"
-            self.validation_label.configure(text=status_text, foreground="#28a745")
-        else:
-            self.validation_label.configure(text="✗ Invalid selection", foreground="#dc3545")
-        
-        # Show warnings if any
-        if validation['warnings']:
-            warning_text = "Warnings: " + "; ".join(validation['warnings'])
-            # You could show this in a separate label or tooltip
-    
-    def _browse_template(self):
-        """Browse for a PowerPoint template file."""
-        file_path = filedialog.askopenfilename(
-            title="Select PowerPoint Template",
-            filetypes=[
-                ("PowerPoint Template", "*.potx"),
-                ("PowerPoint Presentation", "*.pptx"),
-                ("All Files", "*.*")
-            ]
-        )
-        
-        if file_path:
-            self.template_path = file_path
-            self.template_var.set(os.path.basename(file_path))
-            self.export_status.configure(text=f"Template selected: {os.path.basename(file_path)}")
-    
-    def _update_preview(self):
-        """Update the preview text showing current configuration with data-aware content."""
-        try:
-            selected_slides = [
-                slide_id for slide_id, var in self.slide_checkboxes.items()
-                if var.get()
-            ]
-
-            options = self.customizer.get_customization_options()
-            validation = self.customizer.validate_selection(selected_slides)
-
-            # Get filtered vehicle count for data-aware preview
-            filtered = self._get_filtered_vehicles()
-            vehicle_count = len(filtered)
-            filter_active = (self.dept_filter_var.get() != "All Departments"
-                             or self.acf_filter_var.get() != "All Categories"
-                             or self.payback_filter_var.get() != "No Limit")
-
-            # Build data-aware slide descriptions
-            slide_context = self._build_slide_context(filtered)
-
-            # Build preview text
-            lines = []
-            client = self.client_name_var.get().strip() or "(no client name)"
-            lines.append(f"  Client:    {client}")
-            lines.append(f"  Subtitle:  {self.subtitle_var.get()}")
-            lines.append(f"  Stage:     {self.stage_var.get()}")
-            lines.append(f"  Template:  {self.template_var.get()}")
-            if filter_active:
-                lines.append(f"  Vehicles:  {vehicle_count} (filtered)")
-            elif vehicle_count > 0:
-                lines.append(f"  Vehicles:  {vehicle_count}")
-            else:
-                lines.append(f"  Vehicles:  No fleet data loaded")
-            lines.append("")
-            lines.append(f"  Slides ({validation['final_slide_count']}):")
-
-            for slide_id in selected_slides:
-                slide_info = options['slides'].get(slide_id, {})
-                name = slide_info.get('name', slide_id)
-                charts = slide_info.get('charts', [])
-                chart_tag = f"  [{len(charts)} chart]" if charts else ""
-                context = slide_context.get(slide_id, "")
-                detail = f" — {context}" if context else ""
-                lines.append(f"    {name}{chart_tag}{detail}")
-
-            if validation.get('warnings'):
-                lines.append("")
-                for warning in validation['warnings']:
-                    lines.append(f"  ! {warning}")
-
-            # Update filter summary
-            if filter_active:
-                parts = []
-                if self.dept_filter_var.get() != "All Departments":
-                    parts.append(self.dept_filter_var.get())
-                if self.acf_filter_var.get() != "All Categories":
-                    parts.append(self.acf_filter_var.get())
-                if self.payback_filter_var.get() != "No Limit":
-                    parts.append(f"payback {self.payback_filter_var.get()}")
-                self.filter_summary_label.configure(
-                    text=f"Filter active: {', '.join(parts)} ({vehicle_count} vehicles)"
-                )
-            else:
-                self.filter_summary_label.configure(text="")
-
-            # Update preview text widget
-            self.preview_text.configure(state=tk.NORMAL)
-            self.preview_text.delete(1.0, tk.END)
-            self.preview_text.insert(1.0, "\n".join(lines))
-            self.preview_text.configure(state=tk.DISABLED)
-
-            self.preview_status.configure(text=f"Preview updated — {len(selected_slides)} slides selected")
-
-        except Exception as e:
-            logger.error(f"Failed to update preview: {e}")
-            self.preview_status.configure(text="Preview update failed")
-
-    def _build_slide_context(self, vehicles):
-        """Build per-slide context strings from vehicle data for preview."""
-        ctx = {}
-        if not vehicles:
-            return ctx
-
-        n = len(vehicles)
-        success = sum(1 for v in vehicles if getattr(v, 'processing_success', False))
-
-        # Avg MPG
-        mpg_vals = []
-        for v in vehicles:
-            fe = getattr(v, 'fuel_economy', None)
-            if fe:
-                comb = getattr(fe, 'combined_mpg', 0) or 0
-                if comb > 0:
-                    mpg_vals.append(comb)
-        avg_mpg = sum(mpg_vals) / len(mpg_vals) if mpg_vals else 0
-
-        # Departments
-        depts = set()
-        acf_b_count = 0
-        ev_years = {}
-        for v in vehicles:
-            cf = getattr(v, 'custom_fields', {})
-            d = cf.get('Department', '') or getattr(v, 'fleet_management_fields', {}).get('department', '')
-            if d:
-                depts.add(d)
-            if cf.get('_acf_code') == 'B':
-                acf_b_count += 1
-            yr = cf.get('Proposed EV Year', '')
-            if yr and yr not in ('N/A', 'Exempt', ''):
-                try:
-                    ev_years[int(yr)] = ev_years.get(int(yr), 0) + 1
-                except (ValueError, TypeError):
-                    pass
-
-        ctx['cover'] = f"{n} vehicles, {self.client_name_var.get().strip() or 'client TBD'}"
-        ctx['fleet_snapshot'] = f"{n} vehicles, {len(depts)} departments, avg {avg_mpg:.1f} MPG" if avg_mpg else f"{n} vehicles"
-        ctx['fleet_composition'] = f"Body class & make breakdown of {n} vehicles"
-        ctx['financial_summary'] = "TCO comparison, payback timeline"
-        ctx['emissions_timeline'] = "CO2 reduction projection by replacement year"
-        ctx['emissions_by_weight'] = "Emissions by weight class"
-        ctx['electrification_timeline_weight'] = f"Replacements by year & weight class"
-        ctx['electrification_timeline_body'] = f"Replacements by year & body type"
-        if acf_b_count:
-            ctx['executive_recommendations'] = f"{acf_b_count} ACF-regulated vehicles, top 5 priorities"
-        else:
-            ctx['executive_recommendations'] = "Top 5 priority replacements"
-        ctx['replacement_schedule'] = f"Top 12 vehicles sorted by target year"
-        scenario_count = len([k for k, v in self._scenario_vars.items() if v.get()])
-        if self._custom_scenario_var.get():
-            scenario_count += 1
-        ctx['scenario_comparison'] = f"{scenario_count} electrification scenario{'s' if scenario_count != 1 else ''} compared"
-        ctx['age_analysis'] = "Fleet age distribution"
-        ctx['data_quality'] = f"{success}/{n} successfully processed"
-        ctx['next_steps'] = "Data-driven action items"
-
-        return ctx
-    
-    def _export_presentation(self):
-        """Export the PowerPoint presentation with current configuration."""
-        try:
-            # Check if we have fleet data
-            fleet_data = self.sharing_data.get('fleet')
-            if not fleet_data or not hasattr(fleet_data, 'vehicles') or not fleet_data.vehicles:
-                messagebox.showerror(
-                    "No Data", 
-                    "No fleet data available for export.\n\nPlease process vehicle data in the Process tab first."
-                )
-                return
-            
-            # Get current configuration
-            config = self.customizer.get_configuration()
-            
-            # Validate selection
-            selected_slides = config.get_selected_slides()
-            validation = self.customizer.validate_selection(selected_slides)
-            
-            if not validation['valid']:
-                messagebox.showerror("Invalid Selection", "Current slide selection is invalid. Please check your selection.")
-                return
-            
-            # Show warnings if any
-            if validation['warnings']:
-                warning_msg = "Warnings about your selection:\n\n" + "\n".join(f"• {w}" for w in validation['warnings'])
-                warning_msg += "\n\nDo you want to continue anyway?"
-                
-                if not messagebox.askyesno("Selection Warnings", warning_msg):
-                    return
-            
-            # Prompt user for save location
-            fleet_name = fleet_data.name or "fleet"
-            safe_name = "".join(c if c.isalnum() or c in " _-" else "_" for c in fleet_name).strip()
-            default_filename = f"{safe_name}_presentation.pptx"
-
-            user_out_path = filedialog.asksaveasfilename(
-                title="Save PowerPoint Presentation",
-                defaultextension=".pptx",
-                filetypes=[("PowerPoint files", "*.pptx"), ("All files", "*.*")],
-                initialfile=default_filename
-            )
-            if not user_out_path:
-                return  # User cancelled
-
-            # Disable export button
-            self.export_button.configure(state="disabled", text="Generating...")
-            self.progress_bar.pack(fill=tk.X, pady=(5, 0))
-            self.progress_var.set(0)
-
-            # Apply vehicle filter
-            filtered_vehicles = self._get_filtered_vehicles()
-            if not filtered_vehicles:
-                messagebox.showerror(
-                    "No Vehicles",
-                    "No vehicles match the current filter settings.\n\n"
-                    "Adjust the filters in the Vehicle Filter section or select 'All'."
-                )
-                self._reset_export_ui()
-                return
-
-            # Prepare export data with user-editable fields
-            client_name = self.client_name_var.get().strip() or fleet_data.name or 'Fleet Analysis Client'
-            subtitle = self.subtitle_var.get().strip()
-            stage = self.stage_var.get().strip() or 'Preliminary Analysis'
-            export_data = {
-                'fleet': fleet_data,
-                'vehicles': filtered_vehicles,
-                'fleet_name': fleet_data.name,
-                'client_name': client_name,
-                'stage': stage,
-                'subtitle': subtitle if subtitle else f"{stage} Fleet Electrification Analysis",
-                'selected_scenarios': self._get_selected_scenarios(),
-                'custom_scenario': self._get_custom_scenario(),
-            }
-
-            # Start export in background thread
-            def export_thread():
-                try:
-                    self.progress_var.set(25)
-
-                    # Export presentation to user-chosen path
-                    output_path = export_prelim_deck(
-                        data=export_data,
-                        template_path=self.template_path,
-                        out_path=user_out_path,
-                        slide_config=config
-                    )
-                    
-                    self.progress_var.set(100)
-                    
-                    # Update UI in main thread
-                    self.root.after(0, lambda: self._export_completed(output_path))
-                    
-                except Exception as e:
-                    logger.error(f"Export failed: {e}")
-                    self.root.after(0, lambda: self._export_failed(str(e)))
-            
-            # Start export thread
-            threading.Thread(target=export_thread, daemon=True).start()
-            
-        except Exception as e:
-            logger.error(f"Failed to start export: {e}")
-            messagebox.showerror("Export Error", f"Failed to start export: {e}")
-            self._reset_export_ui()
-    
-    def _export_completed(self, output_path: str):
-        """Handle successful export completion."""
-        try:
-            # Reset UI
-            self._reset_export_ui()
-            
-            # Update status
-            file_size = os.path.getsize(output_path)
-            self.export_status.configure(
-                text=f"✓ Export completed: {os.path.basename(output_path)} ({file_size:,} bytes)"
-            )
-            
-            # Show success message
-            msg = f"PowerPoint presentation exported successfully!\n\nFile: {output_path}\nSize: {file_size:,} bytes"
-            
-            if self.auto_open_var.get():
-                msg += "\n\nOpening presentation..."
-                messagebox.showinfo("Export Successful", msg)
-                
-                # Try to open the file with the platform-native viewer
-                try:
-                    if os.name == 'nt':  # Windows
-                        os.startfile(output_path)
-                    elif platform.system() == 'Darwin':  # macOS
-                        subprocess.run(['open', output_path], check=False)
-                    else:  # Linux / other POSIX
-                        subprocess.run(['xdg-open', output_path], check=False)
-                except Exception as e:
-                    logger.warning(f"Could not open presentation: {e}")
-            else:
-                messagebox.showinfo("Export Successful", msg)
-            
-        except Exception as e:
-            logger.error(f"Error in export completion: {e}")
-    
-    def _export_failed(self, error_message: str):
-        """Handle export failure."""
-        self._reset_export_ui()
-        self.export_status.configure(text="✗ Export failed")
-        messagebox.showerror("Export Failed", f"Failed to export presentation:\n\n{error_message}")
-    
-    def _reset_export_ui(self):
-        """Reset the export UI to normal state."""
-        self.export_button.configure(state="normal", text="📊 Generate PowerPoint")
-        self.progress_bar.pack_forget()
-        self.progress_var.set(0)
-    
-    def refresh_data(self):
-        """Refresh the panel when new data is available."""
-        try:
-            fleet_data = self.sharing_data.get('fleet')
-
-            if fleet_data and hasattr(fleet_data, 'vehicles'):
-                vehicle_count = len(fleet_data.vehicles)
-                self.export_status.configure(
-                    text=f"Ready to export — {vehicle_count} vehicles available"
-                )
-                self.export_button.configure(state="normal")
-
-                # Populate filter dropdowns from fleet data
-                self._populate_filter_dropdowns()
-
-                # Pre-fill client name from fleet name if empty
-                if not self.client_name_var.get().strip() and fleet_data.name:
-                    self.client_name_var.set(fleet_data.name)
-            else:
-                self.export_status.configure(text="No fleet data available")
-                self.export_button.configure(state="disabled")
-
-            # Update preview
-            self._update_preview()
-
-        except Exception as e:
-            logger.error(f"Failed to refresh Present panel data: {e}")
-    
     def get_panel_frame(self) -> ttk.Frame:
-        """Get the main panel frame."""
-        # Return the parent frame that contains the scrollable canvas
+        """Return the parent frame (required by MainWindow)."""
         return self.parent_frame
 
-# Helper function for integration
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Module-level factory (backward compat)
+# ─────────────────────────────────────────────────────────────────────────────
+
 def create_present_panel(parent_frame: ttk.Frame, sharing_data: dict) -> PresentPanel:
-    """
-    Create and return a PresentPanel instance.
-    
-    Args:
-        parent_frame: Parent frame to contain the panel
-        sharing_data: Shared data dictionary
-        
-    Returns:
-        PresentPanel instance
-    """
     return PresentPanel(parent_frame, sharing_data)

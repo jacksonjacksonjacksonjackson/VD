@@ -742,7 +742,8 @@ def analyze_charging_needs(
     level2_charging_rate: float = 7.2,  # kW
     dcfc_charging_rate: float = 50.0,  # kW
     level2_cost: float = 4000.0,  # $ per port
-    dcfc_cost: float = 50000.0  # $ per port
+    dcfc_cost: float = 50000.0,  # $ per port
+    facility_field: Optional[str] = None,  # custom_fields key for grouping by facility
 ) -> ChargingAnalysis:
     """
     Analyze charging infrastructure needs for fleet electrification.
@@ -846,5 +847,55 @@ def analyze_charging_needs(
             }
         ]
     }
-    
+
+    # --- Phase 28 extensions ---
+
+    # Expose daily energy and effective charging hours
+    analysis.daily_energy_kwh = daily_energy
+    analysis.charging_hours = float(charging_hours)
+
+    # Hourly load profile: uniform load within the charging window
+    peak_kw = analysis.max_power_required
+    s, e = charging_window
+    hourly_load: List[float] = []
+    for h in range(24):
+        if s < e:
+            in_window = s <= h < e
+        else:
+            in_window = h >= s or h < e
+        hourly_load.append(peak_kw if in_window else 0.0)
+    analysis.hourly_load_kw = hourly_load
+
+    # Per-facility breakdown (group vehicles by a facility/location field)
+    detected_field = facility_field
+    if detected_field is None:
+        for candidate in ("Facility", "Location", "Department",
+                           "facility", "location", "department"):
+            if any(candidate in v.custom_fields for v in fleet.vehicles):
+                detected_field = candidate
+                break
+
+    if detected_field:
+        groups: Dict[str, List] = {}
+        for v in fleet.vehicles:
+            key = str(v.custom_fields.get(detected_field) or "Unknown").strip() or "Unknown"
+            groups.setdefault(key, []).append(v)
+
+        total = len(fleet.vehicles)
+        breakdown = []
+        for fname in sorted(groups):
+            fvehicles = groups[fname]
+            frac = len(fvehicles) / max(1, total)
+            l2_f = max(0, round(level2_chargers * frac))
+            dcfc_f = max(0, round(dcfc_chargers * frac))
+            cost_f = (l2_f * level2_cost) + (dcfc_f * dcfc_cost)
+            breakdown.append({
+                "name": fname,
+                "vehicle_count": len(fvehicles),
+                "l2": l2_f,
+                "dcfc": dcfc_f,
+                "cost": cost_f,
+            })
+        analysis.facility_breakdown = breakdown
+
     return analysis

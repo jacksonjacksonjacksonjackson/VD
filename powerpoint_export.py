@@ -54,6 +54,8 @@ from powerpoint_charts import (
     add_payback_timeline_chart,
     add_scenario_comparison_chart,
     add_age_distribution_chart,
+    add_co2_trajectory_chart,
+    add_cumulative_investment_chart,
 )
 
 logger = logging.getLogger(__name__)
@@ -87,6 +89,16 @@ def _remove_chart_shapes(slide) -> Optional[dict]:
             }
             shape._element.getparent().remove(shape._element)
     return bounds
+
+
+def _clear_body_placeholders(slide) -> None:
+    """Clear body/content placeholders (idx >= 1) to remove 'Click to add text' overlays."""
+    for ph in slide.placeholders:
+        try:
+            if ph.placeholder_format.idx >= 1 and ph.has_text_frame:
+                ph.text_frame.clear()
+        except Exception:
+            pass
 
 
 def _delete_slide(prs: Presentation, slide_index: int) -> None:
@@ -573,6 +585,204 @@ def _add_acf_electrification_chart(
     return True
 
 
+def _add_purchase_schedule_chart(
+    slide,
+    vehicles: List[FleetVehicle],
+    year_map: Optional[Dict[str, str]] = None,
+    end_year: int = 2040,
+) -> bool:
+    """ZEV Purchase Schedule Option: stacked column, 4 ACF series, fixed X-axis.
+
+    Series (bottom to top):
+      Light Duty (Excluded from ACF Regulations) — Cat A — blue
+      Medium or Heavy Duty — Cat B — orange
+      M/HD Vehicles Potentially Exempted from ACF — Cat C — yellow/gold
+      Emergency Vehicles (Excluded from ACF Regulations) — Cat D — grey
+
+    X-axis: fixed 2026–end_year (no dynamic extension; even-spread algorithm
+    ensures no vehicles are assigned outside the planning horizon).
+    Y-axis: "Count of Vehicles for Replacement"
+
+    Args:
+        year_map: {vin: year_str} for scenario overrides. None = read from
+                  custom_fields["Proposed EV Year"] (current plan).
+        end_year: Scenario end year; X-axis ceiling.
+    """
+    if not PPTX_AVAILABLE:
+        return False
+
+    SERIES_DEFS = [
+        ("A", "Light Duty (Excluded from ACF Regulations)",           "#4472C4"),
+        ("B", "Medium or Heavy Duty",                                  SECONDARY_HEX_1),
+        ("C", "M/HD Vehicles Potentially Exempted from ACF",           "#FFC000"),
+        ("D", "Emergency Vehicles (Excluded from ACF Regulations)",    "#808080"),
+    ]
+
+    current_year = datetime.datetime.now().year
+    start_year = 2026
+    years = list(range(start_year, end_year + 1))
+
+    year_acf: Dict[int, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    valid_codes = {s[0] for s in SERIES_DEFS}
+
+    for v in vehicles:
+        code = v.custom_fields.get("_acf_code", "")
+        if code not in valid_codes:
+            continue
+        year_str = (year_map.get(v.vin, "") if year_map is not None
+                    else v.custom_fields.get("Proposed EV Year", ""))
+        try:
+            yr = int(year_str)
+            if start_year <= yr <= end_year:
+                year_acf[yr][code] += 1
+        except (ValueError, TypeError):
+            pass
+
+    if not any(year_acf.values()):
+        return False
+
+    chart_data = CategoryChartData()
+    chart_data.categories = [str(y) for y in years]
+    for code, label, _color in SERIES_DEFS:
+        chart_data.add_series(label, [year_acf[y].get(code, 0) for y in years])
+
+    bounds = _remove_chart_shapes(slide) or {
+        "left": Inches(2.16), "top": Inches(1.85),
+        "width": Inches(10.11), "height": Inches(4.89),
+    }
+
+    chart = slide.shapes.add_chart(
+        XL_CHART_TYPE.COLUMN_STACKED,
+        bounds["left"], bounds["top"], bounds["width"], bounds["height"],
+        chart_data,
+    ).chart
+
+    _style_chart(chart, legend_pos=XL_LEGEND_POSITION.BOTTOM)
+    _hex_series_colors(chart, [s[2] for s in SERIES_DEFS])
+
+    # Y-axis label
+    try:
+        chart.value_axis.has_title = True
+        chart.value_axis.axis_title.text_frame.text = "Count of Vehicles for Replacement"
+    except Exception:
+        pass
+
+    # Data labels: show count, suppress zeros
+    try:
+        for series in chart.series:
+            series.data_labels.show_value = True
+            series.data_labels.number_format = "#,##0;-#,##0;;"
+    except Exception:
+        pass
+
+    try:
+        chart.value_axis.has_major_gridlines = True
+        chart.value_axis.major_gridlines.format.line.color.rgb = _hex_to_rgb("#E0E0E0")
+    except Exception:
+        pass
+
+    return True
+
+
+def _add_milestone_option_chart(
+    slide,
+    vehicles: List[FleetVehicle],
+    year_map: Optional[Dict[str, str]] = None,
+    end_year: int = 2040,
+) -> bool:
+    """ZEV Milestone Option: stacked column, 5 series, Cat B split by GVWR tier.
+
+    Series (bottom to top):
+      Light Duty (Excluded from ACF Regulations) — Cat A — blue
+      Milestone Group 1 (Class 2b–4, GVWR ≤ 19,500 lbs) — Cat B early — light green
+      Milestone Group 2 (Class 5–8a+8b, GVWR > 19,500 lbs) — Cat B late — dark green
+      M/HD Vehicles Potentially Exempted from ACF — Cat C — yellow/gold
+      Emergency Vehicles (Excluded from ACF Regulations) — Cat D — grey
+
+    Y-axis: "Count of Vehicles for Replacement"
+    X-axis: fixed 2026–end_year.
+    """
+    if not PPTX_AVAILABLE:
+        return False
+
+    SERIES_DEFS = [
+        ("A",       "Light Duty (Excluded from ACF Regulations)",         "#4472C4"),
+        ("B_GRP1",  "Milestone Group 1 (Class 2b\u20134)",                "#70AD47"),
+        ("B_GRP2",  "Milestone Group 2 (Class 5\u20138a/8b)",             "#375623"),
+        ("C",       "M/HD Vehicles Potentially Exempted from ACF",         "#FFC000"),
+        ("D",       "Emergency Vehicles (Excluded from ACF Regulations)", "#808080"),
+    ]
+
+    start_year = 2026
+    years = list(range(start_year, end_year + 1))
+    year_series: Dict[int, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
+    for v in vehicles:
+        code = v.custom_fields.get("_acf_code", "")
+        year_str = (year_map.get(v.vin, "") if year_map is not None
+                    else v.custom_fields.get("Proposed EV Year", ""))
+        try:
+            yr = int(year_str)
+            if not (start_year <= yr <= end_year):
+                continue
+        except (ValueError, TypeError):
+            continue
+
+        if code == "A":
+            year_series[yr]["A"] += 1
+        elif code == "B":
+            gvwr = getattr(v.vehicle_id, "gvwr_pounds", 0) or 0
+            bucket = "B_GRP2" if gvwr > 19500 else "B_GRP1"
+            year_series[yr][bucket] += 1
+        elif code == "C":
+            year_series[yr]["C"] += 1
+        elif code == "D":
+            year_series[yr]["D"] += 1
+
+    if not any(year_series.values()):
+        return False
+
+    chart_data = CategoryChartData()
+    chart_data.categories = [str(y) for y in years]
+    for key, label, _color in SERIES_DEFS:
+        chart_data.add_series(label, [year_series[y].get(key, 0) for y in years])
+
+    bounds = _remove_chart_shapes(slide) or {
+        "left": Inches(2.16), "top": Inches(1.85),
+        "width": Inches(10.11), "height": Inches(4.89),
+    }
+
+    chart = slide.shapes.add_chart(
+        XL_CHART_TYPE.COLUMN_STACKED,
+        bounds["left"], bounds["top"], bounds["width"], bounds["height"],
+        chart_data,
+    ).chart
+
+    _style_chart(chart, legend_pos=XL_LEGEND_POSITION.BOTTOM)
+    _hex_series_colors(chart, [s[2] for s in SERIES_DEFS])
+
+    try:
+        chart.value_axis.has_title = True
+        chart.value_axis.axis_title.text_frame.text = "Count of Vehicles for Replacement"
+    except Exception:
+        pass
+
+    try:
+        for series in chart.series:
+            series.data_labels.show_value = True
+            series.data_labels.number_format = "#,##0;-#,##0;;"
+    except Exception:
+        pass
+
+    try:
+        chart.value_axis.has_major_gridlines = True
+        chart.value_axis.major_gridlines.format.line.color.rgb = _hex_to_rgb("#E0E0E0")
+    except Exception:
+        pass
+
+    return True
+
+
 def _calculate_baseline_emissions(vehicles: List[FleetVehicle]) -> float:
     """Total annual fleet emissions if NO electrification occurs (all stay ICE)."""
     total = 0.0
@@ -700,7 +910,8 @@ def _add_tco_appendix_chart(slide, vehicles: List[FleetVehicle]) -> bool:
 def _append_optional_slide(prs: Presentation, slide_id: str,
                            vehicles: List[FleetVehicle],
                            profile: PresentationProfile,
-                           scenario_results: Optional[list] = None) -> bool:
+                           scenario_results: Optional[list] = None,
+                           baseline_co2: float = 0.0) -> bool:
     """Add an optional extra slide to the presentation.
 
     Returns True if a slide was successfully added, False otherwise.
@@ -714,7 +925,8 @@ def _append_optional_slide(prs: Presentation, slide_id: str,
         return _create_acf_composition_slide(prs, vehicles)
 
     if slide_id in ("timeline_moderate", "timeline_aggressive",
-                    "timeline_conservative", "timeline_current_plan"):
+                    "timeline_conservative", "timeline_current_plan",
+                    "timeline_milestone"):
         return _create_scenario_timeline_slide(prs, vehicles, slide_id)
 
     if slide_id == "invalid_vin":
@@ -743,6 +955,28 @@ def _append_optional_slide(prs: Presentation, slide_id: str,
             _set_placeholder_title(slide, "Electrification Scenario Comparison")
             return add_scenario_comparison_chart(slide, scenario_results, left=2.0, top=1.8, width=9.0, height=5.0)
         # No data — remove the blank slide we just added
+        _delete_slide(prs, len(prs.slides) - 1)
+        return False
+
+    elif slide_id == "scenario_co2":
+        if scenario_results:
+            _set_placeholder_title(slide, "Annual Fleet Emissions by Scenario")
+            # Compute baseline_co2 from _scenario_baseline_co2 captured at normalisation
+            return add_co2_trajectory_chart(
+                slide, scenario_results,
+                baseline_co2=baseline_co2,
+                left=1.5, top=1.8, width=10.0, height=5.0,
+            )
+        _delete_slide(prs, len(prs.slides) - 1)
+        return False
+
+    elif slide_id == "scenario_investment":
+        if scenario_results:
+            _set_placeholder_title(slide, "Cumulative Fleet Investment by Scenario")
+            return add_cumulative_investment_chart(
+                slide, scenario_results,
+                left=1.5, top=1.8, width=10.0, height=5.0,
+            )
         _delete_slide(prs, len(prs.slides) - 1)
         return False
 
@@ -844,18 +1078,19 @@ def _create_scenario_timeline_slide(
     vehicles: List[FleetVehicle],
     slide_id: str,
 ) -> bool:
-    """Electrification Timeline for a specific scenario — stacked column optional slide.
+    """ZEV Purchase Schedule timeline for a specific scenario — stacked column optional slide.
 
     slide_id options: timeline_moderate, timeline_aggressive, timeline_conservative,
-                      timeline_current_plan
+                      timeline_current_plan, timeline_milestone
     """
     from analysis.scenarios import get_scenario_year_assignments
 
     SCENARIO_META = {
-        "timeline_moderate":      ("Electrification Timeline — Moderate (2035 Target)",     "moderate",     2035),
-        "timeline_aggressive":    ("Electrification Timeline — Aggressive (2030 Target)",   "aggressive",   2030),
-        "timeline_conservative":  ("Electrification Timeline — Conservative (2040 Target)", "conservative", 2040),
-        "timeline_current_plan":  ("Electrification Timeline — Current Plan",               None,           2040),
+        "timeline_moderate":     ("Electrification Timeline — Moderate (2035 Target)",     "moderate",     2035),
+        "timeline_aggressive":   ("Electrification Timeline — Aggressive (2030 Target)",   "aggressive",   2030),
+        "timeline_conservative": ("Electrification Timeline — Conservative (2040 Target)", "conservative", 2040),
+        "timeline_current_plan": ("Electrification Timeline — Current Plan (ZEV Purchase Schedule)", None, 2040),
+        "timeline_milestone":    ("Electrification Timeline — ZEV Milestone Option",       None,           2040),
     }
     meta = SCENARIO_META.get(slide_id)
     if not meta:
@@ -865,14 +1100,13 @@ def _create_scenario_timeline_slide(
     layout = _get_layout(prs, "Title and Content")
     slide = prs.slides.add_slide(layout)
     _set_placeholder_title(slide, title)
+    _clear_body_placeholders(slide)
 
-    if scenario_key is None:
-        # Current plan: read from custom_fields directly
-        year_map = None
-    else:
-        year_map = get_scenario_year_assignments(vehicles, scenario_key)
+    year_map = None if scenario_key is None else get_scenario_year_assignments(vehicles, scenario_key)
 
-    return _add_acf_electrification_chart(slide, vehicles, year_map=year_map, end_year=end_yr)
+    if slide_id == "timeline_milestone":
+        return _add_milestone_option_chart(slide, vehicles, year_map=year_map, end_year=end_yr)
+    return _add_purchase_schedule_chart(slide, vehicles, year_map=year_map, end_year=end_yr)
 
 
 def _create_invalid_vin_slide(prs: Presentation, vehicles: List[FleetVehicle]) -> bool:
@@ -971,6 +1205,14 @@ def export_presentation(
     else:
         vehicles = []
 
+    # Normalise scenario_results: accept either the raw scenarios list or the full
+    # dict returned by compare_scenarios() {"scenarios": [...], "all_years": [...]}
+    if isinstance(scenario_results, dict) and "scenarios" in scenario_results:
+        scenario_results = scenario_results["scenarios"]
+    # Baseline CO₂ is computed from the vehicles list directly (always available).
+    # Do NOT read from scenario_results dict — compare_scenarios() doesn't include it.
+    _scenario_baseline_co2 = _calculate_baseline_emissions(vehicles) if vehicles else 0.0
+
     tpl = template_path or profile.template_path or DEFAULT_TEMPLATE_PATH
     if not os.path.isfile(tpl):
         raise FileNotFoundError(f"Template not found: {tpl}")
@@ -982,6 +1224,20 @@ def export_presentation(
     included = profile.included_slides if profile.included_slides else list(DEFAULT_SLIDE_IDS)
     # Keep only IDs that exist in the template
     included = [sid for sid in included if sid in TEMPLATE_SLIDE_IDS]
+
+    # --- Chart / slide generation tracking ---
+    _charts_attempted = 0
+    _charts_succeeded = 0
+    _optional_added = 0
+
+    def _track_chart(slide_id: str, result: bool) -> None:
+        nonlocal _charts_attempted, _charts_succeeded
+        _charts_attempted += 1
+        if result:
+            _charts_succeeded += 1
+            logger.info("[export] Chart OK: %s", slide_id)
+        else:
+            logger.warning("[export] Chart FAILED or empty: %s", slide_id)
 
     # --- Modify template slides in-place ---
     # Build a map: slide_id → current slide object (before any deletion)
@@ -996,15 +1252,28 @@ def export_presentation(
     if "key_findings" in slide_map and vehicles:
         _update_key_findings_slide(slide_map["key_findings"], vehicles, profile)
 
-    # Electrification Timeline Chart (slide 7)
+    # Electrification Timeline Chart (slide 7) — ZEV Purchase Schedule Option
     if "timeline_chart" in slide_map and vehicles:
         _remove_chart_shapes(slide_map["timeline_chart"])
-        _add_acf_electrification_chart(slide_map["timeline_chart"], vehicles)
+        ok = _add_purchase_schedule_chart(slide_map["timeline_chart"], vehicles)
+        _track_chart("timeline_chart", ok)
 
-    # GHG Emissions Chart (slide 8)
+    # GHG Emissions Chart (slide 8) — scope-scenario comparison when data available,
+    # else fall back to the 3-series current-plan view.
     if "emissions_chart" in slide_map and vehicles:
         _remove_chart_shapes(slide_map["emissions_chart"])
-        _add_ghg_emissions_chart(slide_map["emissions_chart"], vehicles)
+        _clear_body_placeholders(slide_map["emissions_chart"])
+        if scenario_results:
+            ok = add_co2_trajectory_chart(
+                slide_map["emissions_chart"],
+                scenario_results,
+                baseline_co2=_scenario_baseline_co2,
+                left=2.25, top=1.73, width=9.89, height=5.20,
+            )
+            _track_chart("emissions_chart (scenario)", ok)
+        else:
+            ok = _add_ghg_emissions_chart(slide_map["emissions_chart"], vehicles)
+            _track_chart("emissions_chart (fallback)", ok)
 
     # Data Needs
     if "data_needs" in slide_map and profile.data_needs_items:
@@ -1022,7 +1291,8 @@ def export_presentation(
     # Annual Marginal EV TCO (slide 15)
     if "tco_chart" in slide_map and vehicles:
         _remove_chart_shapes(slide_map["tco_chart"])
-        _add_tco_appendix_chart(slide_map["tco_chart"], vehicles)
+        ok = _add_tco_appendix_chart(slide_map["tco_chart"], vehicles)
+        _track_chart("tco_chart", ok)
 
     # --- Delete unchecked template slides (reverse order) ---
     excluded_template = [sid for sid in TEMPLATE_SLIDE_IDS if sid not in included]
@@ -1072,9 +1342,12 @@ def export_presentation(
 
     for opt_id in (profile.optional_slides or []):
         n_before = len(prs.slides)
-        success = _append_optional_slide(prs, opt_id, vehicles, profile, scenario_results)
+        success = _append_optional_slide(prs, opt_id, vehicles, profile, scenario_results, _scenario_baseline_co2)
         if not success or len(prs.slides) <= n_before:
+            logger.debug("[export] Optional slide skipped (no data): %s", opt_id)
             continue  # slide was not added (conditional slide, no data, etc.)
+        _optional_added += 1
+        _track_chart(f"optional:{opt_id}", success)
 
         # The new slide is at index n_before (last slide)
         if opt_id in _INSERT_BEFORE:
@@ -1098,8 +1371,18 @@ def export_presentation(
 
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     prs.save(out_path)
-    logger.info("[export_presentation] Saved to: %s", out_path)
-    return os.path.abspath(out_path)
+
+    total_slides = len(prs.slides)
+    logger.info("[export_presentation] Saved to: %s (%d slides, %d/%d charts OK, %d optional)",
+                out_path, total_slides, _charts_succeeded, _charts_attempted, _optional_added)
+
+    return {
+        "path": os.path.abspath(out_path),
+        "total_slides": total_slides,
+        "charts_attempted": _charts_attempted,
+        "charts_succeeded": _charts_succeeded,
+        "optional_slides_added": _optional_added,
+    }
 
 
 ###############################################################################

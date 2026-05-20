@@ -34,22 +34,33 @@ class ResultsPanel(ttk.Frame):
     """
     
     def __init__(self, parent, data=None, visible_columns=None,
-               on_selection_change=None, on_column_change=None):
+               on_selection_change=None, on_column_change=None,
+               db_manager=None, on_acf_override=None):
         """
         Initialize the results panel.
-        
+
         Args:
             parent: Parent widget
             data: Initial data to display (list of FleetVehicle objects)
             visible_columns: Initially visible columns (or None for defaults)
             on_selection_change: Callback when selection changes
             on_column_change: Callback when column visibility changes
+            db_manager: VehicleDatabaseManager instance (optional).  When
+                provided, enables "Save MPG to Database" from the context menu.
+            on_acf_override: Callback(vehicle) fired after an ACF category
+                override is applied, so the main window can sync other panels.
         """
         super().__init__(parent)
-        
+
         # Store callbacks
         self.on_selection_change_callback = on_selection_change
         self.on_column_change_callback = on_column_change
+        self.db_manager = db_manager
+        self.on_acf_override_callback = on_acf_override
+
+        # Fleet type for single-vehicle ACF recalculation — updated by main_window
+        # after Run Full Analysis so ACF override → recalculate uses the correct deadlines.
+        self._fleet_type = "hpf"
         
         # Initialize variables
         self.data = data or []
@@ -259,7 +270,21 @@ class ResultsPanel(ttk.Frame):
             label="Deselect All",
             command=self._deselect_all
         )
-        
+
+        self.context_menu.add_separator()
+
+        self.context_menu.add_command(
+            label="Save MPG to Database",
+            command=self._save_mpg_to_database
+        )
+
+        self.context_menu.add_separator()
+
+        self.context_menu.add_command(
+            label="Override ACF Category...",
+            command=self._override_acf_category,
+        )
+
         # Bind right-click to show menu
         self.tree.bind("<Button-3>", self._show_context_menu)
     
@@ -320,13 +345,18 @@ class ResultsPanel(ttk.Frame):
             "Annual Mileage": 105,
             "Is Diesel": 75,
             "Is Commercial": 90,
-            # Match quality
+            # Match quality & MPG provenance
             "Match Confidence": 110,
             "Fuel Type Mismatch": 180,
+            "MPG Source": 150,
+            "MPG Estimated": 100,
+            "EPA Class Est. MPG": 170,
             # ACF compliance & electrification
             "ACF Category": 140,
             "ACF Detail": 220,
+            "ACF Relevance": 180,
             "Proposed EV Year": 115,
+            "EV Year Reason": 250,
             # EV equivalent matching
             "EV Equivalent": 180,
             "EV MSRP Range": 150,
@@ -539,11 +569,26 @@ class ResultsPanel(ttk.Frame):
         text_color = "#4682B4"  # Steel blue for filtered results
         self.summary_label.config(text="  ·  ".join(parts), foreground=text_color)
 
-        mpg_count = len(mpg_values)
-        if mpg_count > 0 and mpg_count < len(successful):
-            self.count_label.config(text=f"MPG data for {mpg_count}/{len(successful)}")
+        # MPG coverage badge (same bucketing as full-fleet summary)
+        real_mpg = sum(1 for v in successful
+                       if v.fuel_economy.combined_mpg > 0 and not v.fuel_economy.mpg_is_estimate)
+        est_mpg = sum(1 for v in successful
+                      if v.fuel_economy.combined_mpg > 0 and v.fuel_economy.mpg_is_estimate)
+        missing_mpg = len(successful) - real_mpg - est_mpg
+
+        if missing_mpg > 0:
+            badge = f"⚠ {missing_mpg}/{len(successful)} missing MPG"
+            if est_mpg > 0:
+                badge += f"  ·  {est_mpg} estimated"
+            self.count_label.config(text=badge, foreground="#CC5500")
+        elif est_mpg > 0:
+            self.count_label.config(
+                text=f"{real_mpg}/{len(successful)} real MPG  ·  {est_mpg} estimated",
+                foreground="#8B6914"
+            )
         else:
-            self.count_label.config(text=f"filtered from {total_count}")
+            self.count_label.config(text=f"filtered from {total_count}",
+                                    foreground=Colors.TEXT_TERTIARY)
     
     def _clear_filter(self):
         """Clear search filter and quick filters."""
@@ -1007,7 +1052,356 @@ Summary of Selected Vehicles ({len(selected_vehicles)})
     def _deselect_all(self):
         """Deselect all items in the treeview."""
         self.tree.selection_remove(self.tree.selection())
-    
+
+    # -------------------------------------------------------------------------
+    # Database integration
+    # -------------------------------------------------------------------------
+
+    def _override_acf_category(self) -> None:
+        """Context menu action: manually override the ACF category of the selected vehicle.
+
+        Shows a small dialog with a dropdown of all valid ACF categories.
+        If the user confirms, applies the override and fires on_acf_override_callback.
+        """
+        from ui.analysis_panel import ACF_LABELS, _show_acf_ev_year_dialog, AnalysisPanel
+        from analysis.electrification_timeline import assign_electrification_years
+
+        selected_iids = self.tree.selection()
+        if not selected_iids:
+            messagebox.showinfo("No Selection", "Select a vehicle row first.", parent=self)
+            return
+
+        vehicle = self.data_map.get(selected_iids[0])
+        if vehicle is None:
+            return
+
+        old_code = vehicle.custom_fields.get("ACF Category", "")
+
+        # ── Category picker dialog ────────────────────────────────────────────
+        picker = tk.Toplevel(self)
+        picker.title("Override ACF Category")
+        picker.resizable(False, False)
+        picker.transient(self.winfo_toplevel())
+        picker.grab_set()
+        try:
+            picker.geometry(
+                f"+{self.winfo_rootx() + 80}+{self.winfo_rooty() + 80}"
+            )
+        except tk.TclError:
+            pass
+
+        vehicle_label = " ".join(filter(None, [
+            str(vehicle.vehicle_id.year or ""),
+            vehicle.vehicle_id.make or "",
+            vehicle.vehicle_id.model or "",
+        ])).strip() or "Unknown Vehicle"
+
+        ttk.Label(
+            picker,
+            text=f"Override ACF Category for:\n{vehicle_label}",
+            font=("TkDefaultFont", 10, "bold"),
+        ).pack(padx=20, pady=(16, 4), anchor="w")
+
+        ttk.Label(
+            picker,
+            text=f"Current category: {old_code} — {ACF_LABELS.get(old_code, old_code)}",
+            foreground="#555",
+        ).pack(padx=20, pady=(0, 8), anchor="w")
+
+        ttk.Label(picker, text="New category:").pack(padx=20, anchor="w")
+        options = [
+            f"ZEV — {ACF_LABELS['ZEV']}",
+            f"A — {ACF_LABELS['A']}",
+            f"B — {ACF_LABELS['B']}",
+            f"C — {ACF_LABELS['C']}",
+            f"D — {ACF_LABELS['D']}",
+        ]
+        combo = ttk.Combobox(picker, values=options, state="readonly", width=28)
+        # Pre-select current category
+        current_option = next(
+            (opt for opt in options if opt.startswith(old_code + " — ")),
+            options[0],
+        )
+        combo.set(current_option)
+        combo.pack(padx=20, pady=(4, 12), anchor="w")
+
+        chosen = tk.StringVar(value="cancel")
+
+        def on_ok():
+            chosen.set(combo.get())
+            picker.destroy()
+
+        def on_cancel():
+            picker.destroy()
+
+        btn_row = ttk.Frame(picker)
+        btn_row.pack(padx=20, pady=(0, 16), anchor="e")
+        ttk.Button(btn_row, text="OK", style="Primary.TButton",
+                   command=on_ok).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(btn_row, text="Cancel",
+                   command=on_cancel).pack(side=tk.LEFT)
+
+        picker.wait_window()
+        raw_choice = chosen.get()
+        if raw_choice == "cancel" or not raw_choice:
+            return
+
+        new_code = raw_choice.split(" — ")[0].strip()
+        if new_code == old_code:
+            return  # No change
+
+        # ── EV year warning dialog ────────────────────────────────────────────
+        current_ev_year = vehicle.custom_fields.get("Proposed EV Year", "N/A")
+        ev_choice = _show_acf_ev_year_dialog(
+            self, old_code, new_code, current_ev_year
+        )
+        if ev_choice == "cancel":
+            return
+
+        # Apply the ACF override
+        AnalysisPanel._apply_acf_override(vehicle, new_code)
+
+        if ev_choice == "recalculate":
+            vehicle.custom_fields.pop("EV Year Overridden", None)
+            vehicle.custom_fields.pop("System Recommended EV Year", None)
+            assign_electrification_years([vehicle], fleet_type=self._fleet_type)
+
+        # Refresh the Results table row
+        self.refresh()
+
+        # Notify main window so other panels (Timeline, Analysis) can sync
+        if self.on_acf_override_callback:
+            self.on_acf_override_callback(vehicle)
+
+    def _save_mpg_to_database(self) -> None:
+        """
+        Context menu action: save the selected vehicle's MPG to the reference DB.
+        Opens a confirmation/entry dialog pre-filled with the vehicle's data.
+        """
+        if self.db_manager is None:
+            messagebox.showwarning(
+                "Database Unavailable",
+                "The vehicle reference database could not be opened.\n"
+                "Check the application log for details.",
+                parent=self,
+            )
+            return
+
+        selected_iids = self.tree.selection()
+        if not selected_iids:
+            messagebox.showinfo("No Selection", "Select a vehicle row first.", parent=self)
+            return
+
+        vehicle = self.data_map.get(selected_iids[0])
+        if vehicle is None:
+            return
+
+        self._show_save_mpg_dialog(vehicle)
+
+    def _show_save_mpg_dialog(self, vehicle) -> None:
+        """
+        Show a dialog for saving vehicle MPG data to the reference database.
+
+        Pre-fills fields if the vehicle already has MPG data.
+        Requires manual entry if MPG is zero or missing.
+        """
+        has_mpg = bool(vehicle.fuel_economy.combined_mpg and
+                       vehicle.fuel_economy.combined_mpg > 0)
+
+        dialog = tk.Toplevel(self)
+        dialog.title("Save MPG to Database")
+        dialog.geometry("440x400")
+        dialog.resizable(False, False)
+        dialog.transient(self.winfo_toplevel())
+        dialog.grab_set()
+
+        # Header
+        vehicle_label = " ".join(filter(None, [
+            str(vehicle.vehicle_id.year  or ""),
+            vehicle.vehicle_id.make  or "",
+            vehicle.vehicle_id.model or "",
+        ])).strip() or "Unknown Vehicle"
+
+        ttk.Label(
+            dialog,
+            text=f"Save MPG for: {vehicle_label}",
+            font=(Fonts.FAMILY_SANS, Fonts.SIZE_H3, "bold"),
+        ).pack(padx=16, pady=(14, 2), anchor="w")
+
+        if not has_mpg:
+            ttk.Label(
+                dialog,
+                text="No MPG data found for this vehicle. Enter values manually:",
+                foreground=Colors.WARNING,
+            ).pack(padx=16, pady=(0, 6), anchor="w")
+        else:
+            ttk.Label(
+                dialog,
+                text="Review the pre-filled data and save to the database.",
+                foreground=Colors.TEXT_SECONDARY,
+            ).pack(padx=16, pady=(0, 6), anchor="w")
+
+        ttk.Separator(dialog, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=16, pady=(0, 8))
+
+        # Form
+        form = ttk.Frame(dialog)
+        form.pack(fill=tk.X, padx=16)
+        form.columnconfigure(1, weight=1)
+
+        fields: Dict[str, tk.StringVar] = {}
+
+        def add_row(label: str, key: str, default: str = "", width: int = 22) -> None:
+            row = form.grid_size()[1]
+            ttk.Label(form, text=label, anchor="w", width=16).grid(
+                row=row, column=0, sticky="w", pady=2
+            )
+            var = tk.StringVar(value=default)
+            fields[key] = var
+            ttk.Entry(form, textvariable=var, width=width).grid(
+                row=row, column=1, sticky="ew", pady=2, padx=(0, 4)
+            )
+
+        def add_combo(label: str, key: str, values: list, default: str = "",
+                      width: int = 20) -> None:
+            row = form.grid_size()[1]
+            ttk.Label(form, text=label, anchor="w", width=16).grid(
+                row=row, column=0, sticky="w", pady=2
+            )
+            var = tk.StringVar(value=default)
+            fields[key] = var
+            ttk.Combobox(form, textvariable=var, values=values, width=width).grid(
+                row=row, column=1, sticky="ew", pady=2, padx=(0, 4)
+            )
+
+        year_val  = str(vehicle.vehicle_id.year  or "")
+        make_val  = vehicle.vehicle_id.make  or ""
+        model_val = vehicle.vehicle_id.model or ""
+        fuel_val  = (vehicle.vehicle_id.fuel_type or "").lower()
+
+        add_row("Year:",     "year",  year_val,  8)
+        add_row("Make *:",   "make",  make_val,  22)
+        add_row("Model *:",  "model", model_val, 22)
+        add_combo("Fuel Type:", "fuel_type",
+                  ["", "gasoline", "diesel", "flex", "hybrid", "cng", "propane"],
+                  fuel_val, 18)
+
+        mpg_c   = str(int(vehicle.fuel_economy.combined_mpg)
+                      if has_mpg and vehicle.fuel_economy.combined_mpg == int(vehicle.fuel_economy.combined_mpg)
+                      else round(vehicle.fuel_economy.combined_mpg, 1)) if has_mpg else ""
+        mpg_city = str(int(vehicle.fuel_economy.city_mpg)
+                       if has_mpg and vehicle.fuel_economy.city_mpg and vehicle.fuel_economy.city_mpg == int(vehicle.fuel_economy.city_mpg)
+                       else (round(vehicle.fuel_economy.city_mpg, 1) if has_mpg and vehicle.fuel_economy.city_mpg else "")) if has_mpg else ""
+        mpg_hwy  = str(int(vehicle.fuel_economy.highway_mpg)
+                       if has_mpg and vehicle.fuel_economy.highway_mpg and vehicle.fuel_economy.highway_mpg == int(vehicle.fuel_economy.highway_mpg)
+                       else (round(vehicle.fuel_economy.highway_mpg, 1) if has_mpg and vehicle.fuel_economy.highway_mpg else "")) if has_mpg else ""
+
+        add_row("MPG Combined *:", "mpg_combined", mpg_c,    8)
+        add_row("MPG City:",       "mpg_city",     mpg_city, 8)
+        add_row("MPG Highway:",    "mpg_highway",  mpg_hwy,  8)
+
+        add_combo("Source:", "source",
+                  ["analyst", "manufacturer_spec", "fuelly", "epa_label", "fleet_record"],
+                  "analyst", 18)
+
+        # Notes
+        notes_row = form.grid_size()[1]
+        ttk.Label(form, text="Notes:", anchor="nw", width=16).grid(
+            row=notes_row, column=0, sticky="nw", pady=2
+        )
+        notes_text = tk.Text(form, height=3, width=28, wrap=tk.WORD)
+        notes_text.grid(row=notes_row, column=1, sticky="ew", pady=2, padx=(0, 4))
+
+        ttk.Separator(dialog, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=16, pady=(10, 4))
+
+        # Buttons
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(fill=tk.X, padx=16, pady=(0, 12))
+
+        def do_save() -> None:
+            make  = fields["make"].get().strip()
+            model = fields["model"].get().strip()
+            mpg_c_str = fields["mpg_combined"].get().strip()
+
+            if not make:
+                messagebox.showerror("Validation", "Make is required.", parent=dialog)
+                return
+            if not model:
+                messagebox.showerror("Validation", "Model is required.", parent=dialog)
+                return
+            if not mpg_c_str:
+                messagebox.showerror("Validation", "MPG Combined is required.", parent=dialog)
+                return
+            try:
+                mpg_combined = float(mpg_c_str)
+                if mpg_combined <= 0:
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror(
+                    "Validation",
+                    "MPG Combined must be a number greater than zero.",
+                    parent=dialog
+                )
+                return
+
+            year_str = fields["year"].get().strip()
+            try:
+                year = int(year_str) if year_str else None
+            except ValueError:
+                messagebox.showerror("Validation", "Year must be a number.", parent=dialog)
+                return
+
+            def _safe_float(key: str) -> float:
+                try:
+                    return float(fields[key].get().strip() or 0)
+                except ValueError:
+                    return 0.0
+
+            try:
+                self.db_manager.add_ice_vehicle(
+                    year         = year,
+                    make         = make,
+                    model        = model,
+                    fuel_type    = fields["fuel_type"].get().strip() or None,
+                    body_class   = vehicle.vehicle_id.body_class or None,
+                    mpg_combined = mpg_combined,
+                    mpg_city     = _safe_float("mpg_city"),
+                    mpg_highway  = _safe_float("mpg_highway"),
+                    notes        = notes_text.get("1.0", tk.END).strip(),
+                    source       = fields["source"].get().strip() or "analyst",
+                )
+                messagebox.showinfo(
+                    "Saved",
+                    f"MPG data saved for {make} {model}.\n"
+                    "Future processing runs will use this value.",
+                    parent=dialog,
+                )
+                dialog.destroy()
+            except Exception as e:
+                logger.error(f"Failed to save MPG to database: {e}")
+                messagebox.showerror("Save Failed", f"An error occurred:\n{e}", parent=dialog)
+
+        ttk.Button(
+            btn_frame, text="Cancel",
+            command=dialog.destroy
+        ).pack(side=tk.RIGHT, padx=(4, 0))
+
+        ttk.Button(
+            btn_frame, text="Save to Database",
+            command=do_save,
+            style="Primary.TButton"
+        ).pack(side=tk.RIGHT)
+
+    def select_by_vin(self, vin: str) -> bool:
+        """Select the row matching *vin*, scroll it into view, and return True if found."""
+        target = vin.upper().strip()
+        for iid, vehicle in self.data_map.items():
+            if vehicle.vin and vehicle.vin.upper() == target:
+                self.tree.selection_set(iid)
+                self.tree.see(iid)
+                self.tree.focus(iid)
+                return True
+        return False
+
     def set_data(self, data):
         """
         Set the data for the results panel.
@@ -1060,12 +1454,34 @@ Summary of Selected Vehicles ({len(selected_vehicles)})
 
         self.summary_label.config(text="  ·  ".join(parts), foreground=text_color)
 
-        # Right-side count badge
-        mpg_count = len(mpg_values)
-        if mpg_count > 0 and mpg_count < successful_count:
-            self.count_label.config(text=f"MPG data for {mpg_count}/{successful_count} vehicles")
+        # Right-side count badge — highlights MPG coverage gaps prominently.
+        # Buckets: real MPG (API/scraper), estimated MPG (EPA class average), missing MPG (0).
+        successful_vehicles = [v for v in self.data if v.processing_success]
+        real_mpg_count = sum(
+            1 for v in successful_vehicles
+            if v.fuel_economy.combined_mpg > 0 and not v.fuel_economy.mpg_is_estimate
+        )
+        est_mpg_count = sum(
+            1 for v in successful_vehicles
+            if v.fuel_economy.combined_mpg > 0 and v.fuel_economy.mpg_is_estimate
+        )
+        missing_mpg_count = successful_count - real_mpg_count - est_mpg_count
+
+        if missing_mpg_count > 0:
+            badge_text = f"⚠ {missing_mpg_count} of {successful_count} missing MPG"
+            if est_mpg_count > 0:
+                badge_text += f"  ·  {est_mpg_count} estimated"
+            self.count_label.config(text=badge_text, foreground="#CC5500")
+        elif est_mpg_count > 0:
+            self.count_label.config(
+                text=f"{real_mpg_count}/{successful_count} real MPG  ·  {est_mpg_count} estimated",
+                foreground="#8B6914"
+            )
         else:
-            self.count_label.config(text=f"{total_count} total")
+            self.count_label.config(
+                text=f"{total_count} total",
+                foreground=Colors.TEXT_TERTIARY
+            )
     
     def get_data(self):
         """

@@ -409,7 +409,20 @@ class CommercialVehicleScraper:
         self.use_selenium = use_selenium
         self.extractor = SpecificationExtractor()
         self.session = requests.Session()
-        self.session.headers.update({'User-Agent': self.config['user_agent']})
+        self.session.headers.update({
+            'User-Agent': self.config['user_agent'],
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
+        })
         
         # Graceful degradation settings
         self.graceful_degradation = self.config.get('graceful_degradation', True)
@@ -660,7 +673,23 @@ class CommercialVehicleScraper:
         except Exception as e:
             logger.error(f"Error fetching {url}: {e}")
             return None
-    
+
+    def _fetch_page_silent(self, url: str) -> tuple:
+        """Fetch a page without logging errors; returns (html_or_None, status_code_or_None).
+
+        Used by _scrape_fuelly so individual URL attempts are collected and
+        summarised in a single log line rather than flooding the console.
+        """
+        domain = urlparse(url).netloc
+        self._rate_limit(domain)
+        try:
+            response = self.session.get(url, timeout=SCRAPING_CONFIG['request_timeout'])
+            if response.ok:
+                return response.text, response.status_code
+            return None, response.status_code
+        except Exception:
+            return None, None
+
     # Manufacturer-specific scrapers
     def _scrape_ford_commercial(self, vehicle_id: VehicleIdentification, source: Dict) -> ScrapingResult:
         """Scrape Ford commercial vehicle specifications."""
@@ -1240,108 +1269,141 @@ class CommercialVehicleScraper:
         return has_valid and not has_invalid
     
     def _scrape_fuelly(self, vehicle_id: VehicleIdentification, source: Dict) -> ScrapingResult:
-        """Scrape Fuelly.com for real-world community MPG data."""
+        """Scrape Fuelly.com for real-world community MPG data.
+
+        URL strategy (tried in order, silently):
+          1. Exact year  – /car/<make>/<model>/<year>  and /truck/... variants
+          2. Fuzzy year  – year-1 then year+1 (same variants); tagged if used
+          3. No year     – /car/<make>/<model>  and /truck/... variants
+
+        All individual URL failures are collected and emitted as a single
+        summary log so the console is not flooded with 403 lines per vehicle.
+        """
         year = int(vehicle_id.year)
         make = vehicle_id.make.lower()
         model = self._normalize_fuelly_model_name(vehicle_id.model, vehicle_id.make)
-        
-        # Universal approach: Try BOTH sections AND multiple model variations
-        # No guessing, no assumptions - try everything and let Fuelly tell us what works
-        
-        # Generate multiple model name variations to try
-        model_variations = [
-            model,  # Original normalized model
-        ]
-        
-        # Add common variations for ALL models
+
+        # Build model name variations (underscore ↔ hyphen ↔ bare)
+        model_variations = [model]
         if '_' in model:
-            # Try without underscores: "transit_connect" → "transit-connect", "transitconnect"
-            model_variations.extend([
-                model.replace('_', '-'),
-                model.replace('_', '')
-            ])
-        
+            model_variations.extend([model.replace('_', '-'), model.replace('_', '')])
         if '-' in model:
-            # Try with underscores: "f-350" → "f_350"
             model_variations.append(model.replace('-', '_'))
-            
-        # Add simplified version (remove suffixes)
-        base_model = model.split('_')[0].split('-')[0]  # Get first part only
+        base_model = model.split('_')[0].split('-')[0]
         if base_model != model and len(base_model) >= 2:
             model_variations.append(base_model)
-        
-        # Remove duplicates while preserving order
-        seen = set()
-        model_variations = [x for x in model_variations if not (x in seen or seen.add(x))]
-        
-        # Generate all URL combinations
-        urls_to_try = []
-        for model_var in model_variations:
-            # Try both sections for each model variation
-            urls_to_try.extend([
-                f"https://www.fuelly.com/car/{make}/{model_var}/{year}",
-                f"https://www.fuelly.com/car/{make}/{model_var}",
-                f"https://www.fuelly.com/truck/{make}/{model_var}/{year}",
-                f"https://www.fuelly.com/truck/{make}/{model_var}",
-            ])
-        
+        seen_mv: set = set()
+        model_variations = [x for x in model_variations if not (x in seen_mv or seen_mv.add(x))]
+
+        def _urls_for_year(yr):
+            """Return year-specific URL variants for all model name forms."""
+            urls = []
+            for mv in model_variations:
+                urls.append(f"https://www.fuelly.com/car/{make}/{mv}/{yr}")
+                urls.append(f"https://www.fuelly.com/truck/{make}/{mv}/{yr}")
+            return urls
+
+        def _urls_no_year():
+            """Return year-agnostic URL variants."""
+            urls = []
+            for mv in model_variations:
+                urls.append(f"https://www.fuelly.com/car/{make}/{mv}")
+                urls.append(f"https://www.fuelly.com/truck/{make}/{mv}")
+            return urls
+
+        # Build the search schedule: (label, urls)
+        search_schedule = [
+            ("exact year", _urls_for_year(year)),
+            (f"year-1 ({year - 1})", _urls_for_year(year - 1)),
+            (f"year+1 ({year + 1})", _urls_for_year(year + 1)),
+            ("no year", _urls_no_year()),
+        ]
+
         html = None
-        tried_url = None
-        
-        for fuelly_url in urls_to_try:
-            logger.info(f"Searching Fuelly.com: {fuelly_url}")
-            tried_url = fuelly_url
-            html = self._fetch_page(fuelly_url, use_selenium=False)
-            
-            # Check for success indicators
-            if html and self._is_valid_fuelly_page(html):
-                logger.info(f"Found valid Fuelly page: {fuelly_url}")
-                break  # Found working URL
-            else:
-                logger.debug(f"URL failed or invalid page: {fuelly_url}")
-        
-        # Set the final URL for result reporting
-        fuelly_url = tried_url
-        
-        if not html:
+        winning_url = None
+        winning_label = None
+        failed_log: list = []          # (url, status_code) for summary
+
+        for label, urls in search_schedule:
+            for fuelly_url in urls:
+                page, status = self._fetch_page_silent(fuelly_url)
+                if page and self._is_valid_fuelly_page(page):
+                    html = page
+                    winning_url = fuelly_url
+                    winning_label = label
+                    break
+                else:
+                    failed_log.append((fuelly_url, status))
+            if html:
+                break
+
+        # ── One summary log instead of N error lines ─────────────────────
+        display = vehicle_id.display_name
+        if html:
+            logger.info(
+                f"Fuelly: found data for {display} via {winning_label} "
+                f"({winning_url}) — tried {len(failed_log)} URL(s) before success"
+            )
+        else:
+            # Tally status codes for a concise summary
+            from collections import Counter
+            code_counts = Counter(str(s) if s else "err" for _, s in failed_log)
+            summary = ", ".join(f"{c}×{k}" for k, c in code_counts.most_common())
+            logger.info(
+                f"Fuelly: no data for {display} "
+                f"(tried {len(failed_log)} URLs — {summary})"
+            )
             return ScrapingResult(
                 success=False,
                 source_tier=3,
                 source_name="Fuelly Community",
-                url=fuelly_url,
-                error_message="Failed to fetch Fuelly page"
+                url=failed_log[-1][0] if failed_log else "",
+                error_message=f"Fuelly returned no usable page for {display}"
             )
-        
-        # Extract MPG data from Fuelly page
+
+        # ── Extract MPG from the winning page ────────────────────────────
         soup = BeautifulSoup(html, 'html.parser')
         mpg_data = self._extract_fuelly_mpg_data(soup, vehicle_id)
-        
+
         if not any(key in mpg_data for key in ['mpg_combined', 'mpg_city', 'mpg_highway']):
             return ScrapingResult(
                 success=False,
                 source_tier=3,
                 source_name="Fuelly Community",
-                url=fuelly_url,
+                url=winning_url,
                 error_message="No MPG data found on Fuelly page"
             )
-        
-        # Create specifications object with community MPG data
+
+        # ── Tag fuzzy matches so they are visible in results ─────────────
+        is_fuzzy = winning_label != "exact year"
+        if is_fuzzy:
+            source_name = f"Fuelly Community ({winning_label})"
+            confidence = 0.70   # Slight penalty: data is from adjacent year
+            mpg_data['fuelly_year_note'] = winning_label
+        else:
+            source_name = "Fuelly Community"
+            confidence = 0.85
+
         specs = CommercialVehicleSpecs(
-            data_source="Fuelly Community",
-            data_confidence=0.85,  # Community data is generally reliable
+            data_source=source_name,
+            data_confidence=confidence,
             is_estimated=False
         )
-        
-        logger.info(f"Found Fuelly MPG data: Combined={mpg_data.get('mpg_combined')}, Range={mpg_data.get('mpg_range', 'N/A')}")
-        
+
+        logger.info(
+            f"Fuelly MPG for {display}: combined={mpg_data.get('mpg_combined')}, "
+            f"range={mpg_data.get('mpg_range', 'N/A')}"
+            + (f" [fuzzy: {winning_label}]" if is_fuzzy else "")
+        )
+
         return ScrapingResult(
             success=True,
             source_tier=3,
-            source_name="Fuelly Community",
-            url=fuelly_url,
+            source_name=source_name,
+            url=winning_url,
             data=mpg_data,
             specs=specs,
-            confidence_score=0.85
+            confidence_score=confidence
         )
     
     def _estimate_specifications(self, vehicle_id: VehicleIdentification) -> ScrapingResult:
@@ -1619,19 +1681,31 @@ class EnhancedCommercialVehicleProvider(VehicleDataProvider):
             # Handle both formats: mpg_combined/combined_mpg, mpg_city/city_mpg, etc.
             combined_mpg = result_data.get('combined_mpg') or result_data.get('mpg_combined')
             if combined_mpg:
-                fuel_economy['combined_mpg'] = combined_mpg
-                self.commercial_logger.info(f"Updated combined MPG to {combined_mpg} from {scraping_result.source_name}")
-            
+                # Only overwrite if we currently have no MPG or this is a better source
+                existing_mpg = fuel_economy.get('combined_mpg', 0.0) or 0.0
+                if not existing_mpg:
+                    fuel_economy['combined_mpg'] = combined_mpg
+                    # Tag provenance so analysts can see where the MPG came from
+                    fuel_economy['mpg_source'] = scraping_result.source_name
+                    fuel_economy['mpg_is_estimate'] = False
+                    self.commercial_logger.info(
+                        f"Set combined MPG to {combined_mpg} from {scraping_result.source_name}"
+                    )
+
             city_mpg = result_data.get('city_mpg') or result_data.get('mpg_city')
             if city_mpg:
-                fuel_economy['city_mpg'] = city_mpg
-                self.commercial_logger.info(f"Updated city MPG to {city_mpg} from {scraping_result.source_name}")
-            
+                existing_city = fuel_economy.get('city_mpg', 0.0) or 0.0
+                if not existing_city:
+                    fuel_economy['city_mpg'] = city_mpg
+                    self.commercial_logger.info(f"Set city MPG to {city_mpg} from {scraping_result.source_name}")
+
             highway_mpg = result_data.get('highway_mpg') or result_data.get('mpg_highway')
             if highway_mpg:
-                fuel_economy['highway_mpg'] = highway_mpg
-                self.commercial_logger.info(f"Updated highway MPG to {highway_mpg} from {scraping_result.source_name}")
-            
+                existing_hw = fuel_economy.get('highway_mpg', 0.0) or 0.0
+                if not existing_hw:
+                    fuel_economy['highway_mpg'] = highway_mpg
+                    self.commercial_logger.info(f"Set highway MPG to {highway_mpg} from {scraping_result.source_name}")
+
             # Update fuel economy in merged data
             merged['fuel_economy'] = fuel_economy
             
