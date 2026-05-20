@@ -32,15 +32,20 @@ from settings import (
     SECONDARY_HEX_1,
     SECONDARY_HEX_2,
     DEFAULT_VISIBLE_COLUMNS,
+    DEFAULT_DB_FILE,
     USER_SETTINGS,
     save_user_settings
 )
-from utils import StatusBar, SimpleTooltip, ProgressDialog, SafeDict, timestamp
+from utils import StatusBar, SimpleTooltip, ProgressDialog, SafeDict, timestamp, ScrollableFrame
 
 # Import UI panels
 from ui.process_panel import ProcessPanel
 from ui.results_panel import ResultsPanel
 from ui.analysis_panel import AnalysisPanel
+from ui.timeline_panel import TimelinePanel
+from ui.present_panel import PresentPanel
+from ui.charging_panel import ChargingPanel
+from ui.database_panel import DatabasePanel
 
 # Import data and analysis modules
 from data.models import FleetVehicle, Fleet
@@ -81,7 +86,20 @@ class MainWindow:
         self.fleet = Fleet(name="New Fleet")
         self.results_data = []
         self.sharing_data = SafeDict()  # Thread-safe dictionary for sharing data between panels
-        
+
+        # Initialize vehicle reference database.
+        # A single instance is shared across DatabasePanel and ResultsPanel so
+        # analysts can manage entries and save from the results view.
+        # The ProcessingPipeline opens its own separate connection (read-only
+        # during runs) — two SQLite WAL-mode connections coexist safely.
+        try:
+            from data.vehicle_database import VehicleDatabaseManager
+            self.db_manager = VehicleDatabaseManager(DEFAULT_DB_FILE)
+            logger.info("Vehicle reference database initialized")
+        except Exception as _db_err:
+            logger.warning(f"Vehicle reference database unavailable: {_db_err}")
+            self.db_manager = None
+
         # Create and configure styles
         self._create_styles()
         
@@ -181,6 +199,7 @@ class MainWindow:
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.on_closing)
         menubar.add_cascade(label="File", menu=file_menu)
+        self._file_menu = file_menu
         
         # Edit menu
         edit_menu = Menu(menubar, tearoff=0)
@@ -198,9 +217,22 @@ class MainWindow:
         
         # Tools menu
         tools_menu = Menu(menubar, tearoff=0)
-        tools_menu.add_command(label="Analyze Fleet Emissions", command=self.analyze_emissions)
-        tools_menu.add_command(label="Electrification Modeling", command=self.analyze_electrification)
-        tools_menu.add_command(label="Charging Infrastructure", command=self.analyze_charging)
+        tools_menu.add_command(label="Run Full Analysis",
+                               command=self.run_full_analysis)
+        tools_menu.add_separator()
+        # Individual analysis sub-menu for power users
+        individual_menu = Menu(tools_menu, tearoff=0)
+        individual_menu.add_command(label="Emissions Only",
+                                    command=self.analyze_emissions)
+        individual_menu.add_command(label="Electrification Only",
+                                    command=self.analyze_electrification)
+        # Charging analysis hidden until engine is implemented
+        # individual_menu.add_command(label="Charging Infrastructure Only",
+        #                             command=self.analyze_charging)
+        tools_menu.add_cascade(label="Individual Analyses ▸", menu=individual_menu)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="Reset All EV Year Overrides",
+                               command=self._reset_all_ev_overrides)
         menubar.add_cascade(label="Tools", menu=tools_menu)
         
         # Help menu
@@ -232,7 +264,9 @@ class MainWindow:
             data=self.fleet.vehicles,
             visible_columns=DEFAULT_VISIBLE_COLUMNS,
             on_selection_change=self.on_result_selection_change,
-            on_column_change=self.on_column_change
+            on_column_change=self.on_column_change,
+            db_manager=self.db_manager,
+            on_acf_override=self._on_acf_override,
         )
         self.results_panel.pack(fill=tk.BOTH, expand=True)
         self.notebook.add(self.results_frame, text="Results")
@@ -243,11 +277,55 @@ class MainWindow:
             self.analysis_frame,
             fleet=self.fleet,
             on_analysis_complete=self.on_analysis_complete,
-            on_report_generation=self.on_report_generated
+            on_report_generation=self.on_report_generated,
+            sharing_data=self.sharing_data,
         )
         self.analysis_panel.pack(fill=tk.BOTH, expand=True)
         self.notebook.add(self.analysis_frame, text="Analysis")
-    
+
+        # Timeline panel (tab 3 — inserted before Present)
+        self.timeline_frame = ttk.Frame(self.notebook)
+        self.timeline_panel = TimelinePanel(
+            self.timeline_frame,
+            fleet=self.fleet,
+            on_year_changed=self._on_timeline_year_changed,
+            on_acf_changed=self._on_acf_override,
+        )
+        self.timeline_panel.pack(fill=tk.BOTH, expand=True)
+        self.notebook.add(self.timeline_frame, text="Timeline")
+
+        # Present panel
+        self.present_frame = ttk.Frame(self.notebook)
+        self.present_panel = PresentPanel(
+            self.present_frame,
+            sharing_data=self.sharing_data
+        )
+        self.present_panel.get_panel_frame().pack(fill=tk.BOTH, expand=True)
+        self.notebook.add(self.present_frame, text="Present")
+
+        # Charging panel (tab 5)
+        self.charging_frame = ttk.Frame(self.notebook)
+        self.charging_panel = ChargingPanel(
+            self.charging_frame,
+            sharing_data=self.sharing_data,
+            analysis_vars=self.analysis_panel.get_charging_vars(),
+            on_run_analysis=self._run_charging_from_panel,
+        )
+        self.charging_panel.get_panel_frame().pack(fill=tk.BOTH, expand=True)
+        self.notebook.add(self.charging_frame, text="Charging")
+        self.notebook.hide(self.charging_frame)  # Hidden until analysis engine implemented
+
+        # Database panel (tab 6)
+        self.database_frame = ttk.Frame(self.notebook)
+        self.database_panel = DatabasePanel(
+            self.database_frame,
+            db_manager=self.db_manager,
+            root=self.root,
+            status_bar=self.status_bar
+        )
+        self.database_panel.pack(fill=tk.BOTH, expand=True)
+        self.notebook.add(self.database_frame, text="Database")
+
     def _bind_events(self):
         """Bind events for the main window."""
         # Notebook tab change
@@ -278,20 +356,42 @@ class MainWindow:
         except Exception as e:
             logger.error(f"Error saving user settings: {e}")
         
+        # Close vehicle reference database connection
+        if self.db_manager:
+            try:
+                self.db_manager.close()
+            except Exception:
+                pass
+
         # Close the application
         self.root.destroy()
     
     def on_tab_changed(self, event):
         """Handle notebook tab changed event."""
-        current_tab = self.notebook.index(self.notebook.select())
-        
-        # Update status based on current tab
-        if current_tab == 0:  # Process tab
+        selected = self.notebook.select()
+
+        # Update status based on current tab (widget-based, resilient to hidden tabs)
+        if selected == str(self.process_frame):
             self.status_bar.set("Process vehicles by VIN")
-        elif current_tab == 1:  # Results tab
+        elif selected == str(self.results_frame):
             self.status_bar.set("View and filter processed vehicles")
-        elif current_tab == 2:  # Analysis tab
+        elif selected == str(self.analysis_frame):
             self.status_bar.set("Analyze fleet electrification potential")
+            # Keep the Gantt current if years were edited in the Timeline tab
+            try:
+                self.analysis_panel._update_gantt_section()
+            except Exception:
+                pass
+        elif selected == str(self.timeline_frame):
+            self.status_bar.set("Edit vehicle electrification years and view Gantt timeline")
+        elif selected == str(self.present_frame):
+            self.status_bar.set("Configure and export a PowerPoint presentation")
+        elif selected == str(self.charging_frame):
+            self.status_bar.set("Configure charging parameters and view infrastructure analysis")
+            self.charging_panel.refresh_data()
+        elif selected == str(self.database_frame):
+            self.status_bar.set("Browse and manage the vehicle MPG reference database")
+            self.database_panel.refresh()
     
     def on_window_resize(self, event):
         """Handle window resize event."""
@@ -329,6 +429,56 @@ class MainWindow:
         
         # No need to save here, will be saved on application close
     
+    def _on_timeline_year_changed(self):
+        """Called when the Timeline panel applies or resets a year override.
+
+        Refreshes the Analysis tab's Gantt chart so both panels stay in sync.
+        """
+        try:
+            self.analysis_panel._update_gantt_section()
+        except Exception as exc:
+            logger.warning(f"Could not refresh Analysis Gantt after year change: {exc}")
+
+    def _on_acf_override(self, vehicle=None):
+        """Called when an ACF category override is applied or reset (from either
+        the Timeline tab or the Results tab right-click menu).
+
+        Refreshes the Timeline panel and Analysis Gantt so all views reflect
+        the new classification.  The ``vehicle`` argument is accepted for
+        compatibility with the Results panel callback signature but is not used
+        — the full fleet refresh is always performed.
+        """
+        try:
+            self.timeline_panel.notify_year_changed()
+        except Exception as exc:
+            logger.warning(f"Could not refresh Timeline after ACF override: {exc}")
+        try:
+            self.analysis_panel._update_gantt_section()
+        except Exception as exc:
+            logger.warning(f"Could not refresh Analysis Gantt after ACF override: {exc}")
+
+    def _reset_all_ev_overrides(self):
+        """Tools menu: reset all manual EV-year overrides in the current fleet."""
+        if not self.fleet or not self.fleet.vehicles:
+            messagebox.showinfo("No Fleet", "No fleet is currently loaded.")
+            return
+        overridden = sum(
+            1 for v in self.fleet.vehicles
+            if v.custom_fields.get("EV Year Overridden") == "Yes"
+        )
+        if overridden == 0:
+            messagebox.showinfo("No Overrides",
+                                "No manual EV year overrides are currently active.")
+            return
+        if messagebox.askyesno(
+            "Reset All Overrides",
+            f"Reset {overridden} manual EV year "
+            f"override{'s' if overridden != 1 else ''}?\n\n"
+            "All vehicles will revert to their system-recommended EV years.",
+        ):
+            self.analysis_panel._reset_all_overrides()
+            self.timeline_panel.notify_year_changed()
+
     def on_analysis_complete(self, analysis_type, results):
         """
         Handle analysis completion.
@@ -339,14 +489,32 @@ class MainWindow:
         """
         # Update status
         self.status_bar.set(f"{analysis_type} analysis complete")
-        
+
         # Store results in shared data
         self.sharing_data.set(f"{analysis_type.lower()}_results", results)
-    
+
+        # Sync fleet_type to the results panel so ACF override → recalculate
+        # uses the same deadline table selected in the Analysis tab Fleet Settings.
+        self.results_panel._fleet_type = self.fleet.fleet_type
+
+        # Forward charging analysis results to the Charging tab
+        if analysis_type == "Charging":
+            try:
+                self.charging_panel.show_results(results)
+            except Exception:
+                pass
+
+    def _run_charging_from_panel(self):
+        """Trigger charging analysis from the Charging tab's Run button."""
+        try:
+            self.analysis_panel.run_charging_analysis()
+        except Exception as exc:
+            logger.error(f"Error starting charging analysis: {exc}")
+
     def on_report_generated(self, report_path):
         """
         Handle report generation completion.
-        
+
         Args:
             report_path: Path to the generated report
         """
@@ -386,8 +554,15 @@ class MainWindow:
         # Update UI
         self.results_panel.set_data(self.fleet.vehicles)
         self.analysis_panel.set_fleet(self.fleet)
+        self.timeline_panel.set_fleet(
+            self.fleet,
+            on_year_changed=self._on_timeline_year_changed,
+            on_acf_changed=self._on_acf_override,
+        )
+        self.sharing_data.set("fleet", self.fleet)  # B1: keep Present panel in sync
+        self.present_panel.refresh_data()
         self.update_vehicle_count()
-        
+
         # Update status
         self.status_bar.set("New fleet created")
     
@@ -468,122 +643,27 @@ class MainWindow:
             )
     
     def export_report(self):
-        """Export a comprehensive report with data and analysis."""
-        # Check if there are results to export
-        if not self.fleet.vehicles:
-            messagebox.showinfo("No Data", "There are no results to export.")
-            return
-        
-        # Get file path
-        filepath = filedialog.asksaveasfilename(
-            title="Export Report",
-            defaultextension=".xlsx",
-            filetypes=[
-                ("Excel Files", "*.xlsx"),
-                ("PDF Files", "*.pdf"),
-                ("All Files", "*.*")
-            ]
-        )
-        
-        if not filepath:
-            return
-        
-        # Show progress dialog
-        progress = ProgressDialog(
-            self.root,
-            "Generating Report",
-            "Please wait while the report is being generated..."
-        )
-        
-        # Run export in background thread
-        def export_task():
-            try:
-                # Get analysis results from shared data
-                electrification_analysis = self.sharing_data.get("electrification_results")
-                charging_analysis = self.sharing_data.get("charging_results")
-                emissions_analysis = self.sharing_data.get("emissions_results")
-                
-                # Run any missing analysis if needed
-                if not electrification_analysis:
-                    progress.update(25, message="Running electrification analysis...")
-                    electrification_analysis = self.analysis_panel.run_electrification_analysis()
-                
-                progress.update(50, message="Generating charts...")
-                
-                # Export the report
-                from analysis.reports import ReportGeneratorFactory
-                
-                generator = ReportGeneratorFactory.create_generator(filepath)
-                if generator:
-                    progress.update(75, message="Exporting report...")
-                    
-                    success = generator.generate(
-                        fleet=self.fleet,
-                        analysis=electrification_analysis,
-                        charging=charging_analysis,
-                        emissions=emissions_analysis
-                    )
-                    
-                    if success:
-                        progress.update(100, message="Report complete!")
-                        
-                        # Show success message after progress dialog is closed
-                        self.root.after(
-                            500,
-                            lambda: messagebox.showinfo(
-                                "Export Complete",
-                                f"Report has been exported to:\n{filepath}"
-                            )
-                        )
-                    else:
-                        # Show error message after progress dialog is closed
-                        self.root.after(
-                            500,
-                            lambda: messagebox.showerror(
-                                "Export Failed",
-                                "An error occurred while exporting the report."
-                            )
-                        )
-                else:
-                    # Show error message after progress dialog is closed
-                    self.root.after(
-                        500,
-                        lambda: messagebox.showerror(
-                            "Export Failed",
-                            "Unsupported file format."
-                        )
-                    )
-                
-            except Exception as e:
-                logger.error(f"Error exporting report: {e}")
-                
-                # Show error message after progress dialog is closed
-                self.root.after(
-                    500,
-                    lambda: messagebox.showerror(
-                        "Export Failed",
-                        f"An error occurred: {str(e)}"
-                    )
-                )
-            
-            finally:
-                # Close progress dialog
-                self.root.after(100, progress.destroy)
-        
-        # Start export thread
-        threading.Thread(target=export_task, daemon=True).start()
+        """Export comprehensive report — delegates to the Analysis panel.
+
+        Routing all exports through analysis_panel.export_full_report() ensures
+        the 'Timelines to Include' dialog, override flagging, and 8-tab structure
+        are always applied consistently, regardless of which menu or button the
+        user clicked.
+        """
+        self.analysis_panel.export_full_report()
     
     def copy_selection(self):
         """Copy the current selection to the clipboard."""
-        # Determine current tab and delegate to appropriate panel
         current_tab = self.notebook.index(self.notebook.select())
-        
-        if current_tab == 0:  # Process tab
+
+        if current_tab == 0:    # Process tab
             self.process_panel.copy_selection()
         elif current_tab == 1:  # Results tab
             self.results_panel.copy_selection()
         elif current_tab == 2:  # Analysis tab
             self.analysis_panel.copy_selection()
+        elif current_tab == 3:  # Timeline tab
+            self.timeline_panel.copy_selection()
     
     def show_preferences(self):
         """Show the preferences dialog."""
@@ -618,7 +698,16 @@ class MainWindow:
         # Appearance preferences
         appearance_frame = ttk.Frame(prefs_notebook)
         prefs_notebook.add(appearance_frame, text="Appearance")
-        
+
+        ttk.Label(
+            appearance_frame,
+            text="Appearance settings are not yet configurable.\n\n"
+                 "The application uses the system default theme.\n"
+                 "Future options may include font size and color themes.",
+            justify=tk.LEFT,
+            wraplength=350
+        ).pack(padx=15, pady=15, anchor="nw")
+
         # Add buttons
         button_frame = ttk.Frame(prefs_dialog)
         button_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=10)
@@ -657,121 +746,128 @@ class MainWindow:
     
     def customize_columns(self):
         """Show the column customization dialog."""
+        from settings import DEFAULT_VISIBLE_COLUMNS
+
         # Create dialog
         columns_dialog = tk.Toplevel(self.root)
         columns_dialog.title("Customize Columns")
-        columns_dialog.geometry("300x400")
-        columns_dialog.transient(self.root)  # Set as transient to main window
-        columns_dialog.grab_set()  # Make modal
-        
+        columns_dialog.geometry("540x520")
+        columns_dialog.minsize(420, 380)
+        columns_dialog.resizable(True, True)
+        columns_dialog.transient(self.root)
+        columns_dialog.grab_set()
+
         # Get current column configuration
         all_columns = self.results_panel.get_all_columns()
         visible_columns = self.results_panel.get_visible_columns()
-        
-        # Create column selection UI
+
+        # ── Header row: label + selected count ──────────────────────────────
+        header_frame = ttk.Frame(columns_dialog)
+        header_frame.pack(fill=tk.X, padx=12, pady=(10, 4))
+
         ttk.Label(
-            columns_dialog, 
-            text="Select columns to display:", 
+            header_frame,
+            text="Select columns to display:",
             font=("", 10, "bold")
-        ).pack(anchor=tk.W, padx=10, pady=5)
-        
-        # Create a frame with scrollbar for checkboxes
-        checkbox_frame = ttk.Frame(columns_dialog)
-        checkbox_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        
-        # Create canvas and scrollbar
-        canvas = tk.Canvas(checkbox_frame)
-        scrollbar = ttk.Scrollbar(checkbox_frame, orient=tk.VERTICAL, command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        # Create a frame inside the canvas for checkboxes
-        inner_frame = ttk.Frame(canvas)
-        canvas.create_window((0, 0), window=inner_frame, anchor=tk.NW)
-        
-        # Create checkbox variables
+        ).pack(side=tk.LEFT)
+
+        count_var = tk.StringVar()
+        count_label = ttk.Label(header_frame, textvariable=count_var, foreground="gray")
+        count_label.pack(side=tk.RIGHT)
+
+        # ── Scrollable 2-column checkbox grid ───────────────────────────────
+        sf_cols = ScrollableFrame(columns_dialog)
+        sf_cols.pack(fill=tk.BOTH, expand=True, padx=12, pady=4)
+        inner_frame = sf_cols.scrollable_frame
+
+        # Make both checkbox columns expand evenly
+        inner_frame.columnconfigure(0, weight=1)
+        inner_frame.columnconfigure(1, weight=1)
+
         checkbox_vars = {}
-        
-        # Create checkboxes for each column
+
+        def update_count():
+            n = sum(1 for v in checkbox_vars.values() if v.get())
+            count_var.set(f"{n} of {len(checkbox_vars)} selected")
+
         for i, (col_id, col_name) in enumerate(all_columns):
             var = tk.BooleanVar(value=col_id in visible_columns)
+            var.trace_add("write", lambda *_: update_count())
             checkbox_vars[col_id] = var
-            
+
+            row, col = divmod(i, 2)
             ttk.Checkbutton(
                 inner_frame,
                 text=col_name,
                 variable=var
-            ).grid(row=i, column=0, sticky=tk.W, padx=5, pady=2)
-        
-        # Update canvas when frame size changes
-        def on_frame_configure(event):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-        
-        inner_frame.bind("<Configure>", on_frame_configure)
-        
-        # Add buttons
+            ).grid(row=row, column=col, sticky=tk.W, padx=8, pady=2)
+
+        update_count()
+
+        # ── Separator ────────────────────────────────────────────────────────
+        ttk.Separator(columns_dialog, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=12, pady=(4, 0))
+
+        # ── Button row ───────────────────────────────────────────────────────
         button_frame = ttk.Frame(columns_dialog)
-        button_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=10)
-        
-        ttk.Button(
-            button_frame, 
-            text="Cancel", 
-            command=columns_dialog.destroy
-        ).pack(side=tk.RIGHT, padx=5)
-        
-        # Helper to select all/none
+        button_frame.pack(fill=tk.X, padx=12, pady=10)
+
+        # Left side: bulk-selection helpers
         def select_all(select=True):
             for var in checkbox_vars.values():
                 var.set(select)
-        
-        ttk.Button(
-            button_frame, 
-            text="Select All", 
-            command=lambda: select_all(True)
-        ).pack(side=tk.LEFT, padx=5)
-        
-        ttk.Button(
-            button_frame, 
-            text="Select None", 
-            command=lambda: select_all(False)
-        ).pack(side=tk.LEFT, padx=5)
-        
-        # Apply changes
+
+        def reset_to_defaults():
+            default_set = set(DEFAULT_VISIBLE_COLUMNS)
+            for col_id, var in checkbox_vars.items():
+                var.set(col_id in default_set)
+
+        ttk.Button(button_frame, text="Select All",
+                   command=lambda: select_all(True)).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(button_frame, text="Select None",
+                   command=lambda: select_all(False)).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(button_frame, text="Reset to Defaults",
+                   command=reset_to_defaults).pack(side=tk.LEFT)
+
+        # Right side: Cancel / Apply
         def apply_columns():
-            # Get selected columns
             selected = [col_id for col_id, var in checkbox_vars.items() if var.get()]
-            
-            # Update results panel
             self.results_panel.set_visible_columns(selected)
-            
-            # Close dialog
             columns_dialog.destroy()
-        
-        ttk.Button(
-            button_frame, 
-            text="Apply", 
-            command=apply_columns
-        ).pack(side=tk.RIGHT, padx=5)
+
+        ttk.Button(button_frame, text="Cancel",
+                   command=columns_dialog.destroy).pack(side=tk.RIGHT, padx=(4, 0))
+        ttk.Button(button_frame, text="Apply",
+                   command=apply_columns).pack(side=tk.RIGHT, padx=(4, 0))
     
     def refresh_view(self):
         """Refresh the current view."""
-        # Determine current tab and refresh the appropriate panel
-        current_tab = self.notebook.index(self.notebook.select())
-        
-        if current_tab == 0:  # Process tab
+        selected = self.notebook.select()
+
+        if selected == str(self.process_frame):
             self.process_panel.refresh()
-        elif current_tab == 1:  # Results tab
+        elif selected == str(self.results_frame):
             self.results_panel.refresh()
-        elif current_tab == 2:  # Analysis tab
+        elif selected == str(self.analysis_frame):
             self.analysis_panel.refresh()
+        elif selected == str(self.timeline_frame):
+            self.timeline_panel.notify_year_changed()
+        elif selected == str(self.present_frame):
+            self.present_panel.refresh_data()
+        elif selected == str(self.charging_frame):
+            self.charging_panel.refresh_data()
+        elif selected == str(self.database_frame):
+            self.database_panel.refresh()
     
+    def run_full_analysis(self):
+        """Run all analyses — mirrors the Analysis tab's Run Full Analysis button."""
+        self.notebook.select(2)
+        self.analysis_panel.run_full_analysis()
+
     def analyze_emissions(self):
         """Run emissions analysis."""
         # Switch to analysis tab
         self.notebook.select(2)
-        
+
         # Run emissions analysis
         self.analysis_panel.run_emissions_analysis()
     
@@ -835,7 +931,7 @@ vehicle VINs. The CSV should have a column named 'VINs' or 'VIN'.
         doc_notebook.add(usage_frame, text="Usage")
         
         usage_text = """
-Usage Instructions:
+Usage Instructions (6-tab workflow):
 
 1. Process Tab:
    - Load a CSV file with VINs
@@ -843,14 +939,30 @@ Usage Instructions:
    - Click "Start Processing" to begin
 
 2. Results Tab:
-   - View processed vehicles in the table
-   - Filter and sort data
-   - Customize visible columns
+   - View and search all processed vehicles
+   - Customize visible columns, filter by quality/status
+   - Right-click to save MPG to the reference database
 
 3. Analysis Tab:
-   - Run different analysis types
-   - View charts and results
-   - Export reports
+   - Click "Run Full Analysis" to compute TCO, emissions & charging
+   - Review fleet KPIs, ACF donut, Top 5 priority vehicles
+   - Compare electrification scenarios (auto-runs with analysis)
+   - Export Excel report (8-tab) or navigate to Present
+
+4. Timeline Tab:
+   - View scheduled EV replacement years for every vehicle
+   - Double-click "Proposed EV Year" to manually override
+   - Filter by ACF category, EV year range, or free text
+   - Live Gantt chart updates with each override
+
+5. Present Tab:
+   - Configure and export a PowerPoint presentation
+   - Select slides, load a client template (.pptx/.potx)
+   - Choose scenarios to include
+
+6. Database Tab:
+   - Browse and manage the analyst-maintained MPG reference DB
+   - Add/edit/delete vehicle specs used as a fallback MPG source
         """
         
         usage_label = ttk.Label(
@@ -953,7 +1065,7 @@ and industry sources to ensure comprehensive and accurate specifications.
             "About Fleet Electrification Analyzer",
             f"{APP_NAME} v{APP_VERSION}\n\n"
             "A tool for analyzing fleet vehicles and planning electrification strategies.\n\n"
-            "© 2023 Fleet Analytics"
+            "© 2026 Fleet Analytics"
         )
     
     def start_processing(self, input_path, output_path, options):
@@ -979,108 +1091,94 @@ and industry sources to ensure comprehensive and accurate specifications.
             messagebox.showerror("Error", "Output path is required.")
             return
         
+        # Store fleet path for profile sidecar
+        self._fleet_input_path = input_path
+        self.present_panel.set_fleet_path(input_path)
+
         # Update status
         self.status_bar.set("Processing started...")
         self.processing = True
         
         # Get processing options
         max_threads = options.get("max_threads", 10)
+        cached_validation = options.get("cached_validation")
         
-        # Define callbacks
+        # Define callbacks — marshal to main thread for Tkinter safety
         def log_callback(message):
-            # Update process panel log
-            self.process_panel.add_log(message)
-            
-            # Update status bar
-            self.status_bar.set(message)
-        
+            def _update_log(m=message):
+                self.process_panel.add_log(m)
+                self.status_bar.set(m)
+            self.root.after(0, _update_log)
+
         def progress_callback(current, total):
-            # Update process panel progress
-            self.process_panel.update_progress(current, total)
+            self.root.after(0, lambda c=current, t=total: self.process_panel.update_progress(c, t))
         
         def done_callback(vehicles):
-            # Add detailed logging
-            logger.info(f"🔧 DEBUG: done_callback received {len(vehicles)} vehicles")
-            logger.info(f"🔧 DEBUG: done_callback called from thread: {threading.current_thread().name}")
-            logger.info(f"🔧 DEBUG: Main thread check: {threading.current_thread() == threading.main_thread()}")
-            
             try:
                 # Update processing state
                 self.processing = False
-                
-                # Log vehicle details for debugging
-                success_count = sum(1 for v in vehicles if v.processing_success)
-                failed_count = len(vehicles) - success_count
-                logger.info(f"🔧 DEBUG: Vehicle breakdown - Success: {success_count}, Failed: {failed_count}")
-                
-                if failed_count > 0:
-                    logger.info(f"🔧 DEBUG: First few failed vehicles:")
-                    for i, v in enumerate([v for v in vehicles if not v.processing_success][:3]):
-                        logger.info(f"🔧 DEBUG: Failed vehicle {i+1}: VIN={v.vin}, Error='{v.processing_error}'")
-                
-                # Log fleet creation attempt
-                logger.info(f"🔧 DEBUG: Creating Fleet object...")
+
                 self.fleet = Fleet(
                     name=f"Fleet Analysis - {time.strftime('%Y-%m-%d')}",
                     vehicles=vehicles,
                     creation_date=datetime.datetime.now(),
                     last_modified=datetime.datetime.now()
                 )
-                logger.info(f"🔧 DEBUG: Fleet created successfully with {len(vehicles)} vehicles")
-                
+
+                # Update shared data for Present panel
+                self.sharing_data.set("fleet", self.fleet)
+
                 # UI updates - ensure they happen on main thread
                 def update_ui():
                     try:
-                        logger.info(f"🔧 DEBUG: Starting UI updates on thread: {threading.current_thread().name}")
-                        
-                        # Update results panel
-                        logger.info(f"🔧 DEBUG: Calling results_panel.set_data() with {len(vehicles)} vehicles")
                         self.results_panel.set_data(vehicles)
-                        logger.info(f"🔧 DEBUG: results_panel.set_data() completed")
-                        
-                        # Update analysis panel
-                        logger.info(f"🔧 DEBUG: Calling analysis_panel.set_fleet()")
                         self.analysis_panel.set_fleet(self.fleet)
-                        logger.info(f"🔧 DEBUG: analysis_panel.set_fleet() completed")
-                        
-                        # Update vehicle count
-                        logger.info(f"🔧 DEBUG: Updating vehicle count")
+                        self.timeline_panel.set_fleet(
+                            self.fleet,
+                            on_year_changed=self._on_timeline_year_changed,
+                            on_acf_changed=self._on_acf_override,
+                        )
+                        self.present_panel.refresh_data()
+
+                        # Load sidecar profile if one exists for this fleet
+                        try:
+                            fleet_path = getattr(self, "_fleet_input_path", None)
+                            if fleet_path:
+                                from data.processor import load_presentation_profile
+                                profile = load_presentation_profile(fleet_path)
+                                self.present_panel.load_profile(profile)
+                                self.sharing_data.set("presentation_profile", profile)
+                        except Exception as _pe:
+                            logger.warning("Could not load presentation profile: %s", _pe)
+
                         self.update_vehicle_count()
-                        
-                        # Update status
-                        status_msg = f"Processing complete. {len(vehicles)} vehicles processed."
-                        logger.info(f"🔧 DEBUG: Setting status: {status_msg}")
+
+                        success_count = sum(1 for v in vehicles if v.processing_success)
+                        status_msg = f"Processing complete. {success_count}/{len(vehicles)} vehicles successful."
                         self.status_bar.set(status_msg)
-                        
+
+                        # Reset process panel button states
+                        self.process_panel.processing_complete()
+
                         # Switch to results tab if there are vehicles
                         if vehicles:
-                            logger.info(f"🔧 DEBUG: Switching to results tab (notebook.select(1))")
                             self.notebook.select(1)  # Results tab
-                            logger.info(f"🔧 DEBUG: Successfully switched to results tab")
-                        else:
-                            logger.warning(f"🔧 DEBUG: No vehicles to display, staying on process tab")
-                        
-                        logger.info(f"🔧 DEBUG: All UI updates completed successfully")
-                        
+
                     except Exception as ui_e:
-                        logger.error(f"🔧 DEBUG: Exception in UI update: {ui_e}")
-                        logger.error(f"🔧 DEBUG: UI update exception type: {type(ui_e).__name__}")
+                        logger.error(f"Error updating UI after processing: {ui_e}")
                         import traceback
-                        logger.error(f"🔧 DEBUG: UI update traceback: {traceback.format_exc()}")
-                
+                        logger.error(traceback.format_exc())
+
                 # Schedule UI update on main thread if we're not on it
                 if threading.current_thread() == threading.main_thread():
-                    logger.info(f"🔧 DEBUG: Already on main thread, updating UI directly")
                     update_ui()
                 else:
-                    logger.info(f"🔧 DEBUG: Not on main thread, scheduling UI update via root.after()")
                     self.root.after(0, update_ui)
-                
+
             except Exception as e:
-                logger.error(f"🔧 DEBUG: Exception in done_callback: {e}")
-                logger.error(f"🔧 DEBUG: done_callback exception type: {type(e).__name__}")
+                logger.error(f"Error in processing completion: {e}")
                 import traceback
-                logger.error(f"🔧 DEBUG: done_callback traceback: {traceback.format_exc()}")
+                logger.error(traceback.format_exc())
         
         # Start processing
         self.processor.process_file(
@@ -1088,7 +1186,8 @@ and industry sources to ensure comprehensive and accurate specifications.
             output_path=output_path,
             log_callback=log_callback,
             progress_callback=progress_callback,
-            done_callback=done_callback
+            done_callback=done_callback,
+            cached_validation=cached_validation,
         )
     
     def stop_processing(self):
@@ -1106,6 +1205,9 @@ and industry sources to ensure comprehensive and accurate specifications.
             
             # Update state
             self.processing = False
-            
+
+            # Reset process panel button states
+            self.process_panel.processing_stopped()
+
             # Update status
             self.status_bar.set("Processing stopped.")

@@ -81,31 +81,9 @@ class VehicleIdentification(BaseModel):
     
     def __post_init__(self):
         """Process data after initialization."""
-        try:
-            # Add diagnostic logging
-            diagnostic_logger = logging.getLogger("diagnostic")
-            diagnostic_logger.info(f"🔧 DIAGNOSTIC: VehicleIdentification __post_init__ START: {self.vin}")
-            diagnostic_logger.info(f"🔧 DIAGNOSTIC: GVWR values: gvwr='{self.gvwr}', gvwr_raw='{self.gvwr_raw}'")
-            diagnostic_logger.info(f"🔧 DIAGNOSTIC: Engine values: displacement='{self.engine_displacement}', cylinders='{self.engine_cylinders}'")
-            
-            self._process_gvwr()
-            diagnostic_logger.info(f"🔧 DIAGNOSTIC: GVWR processing completed: gvwr_pounds={self.gvwr_pounds}, commercial_category='{self.commercial_category}'")
-            
-            self._classify_commercial()
-            diagnostic_logger.info(f"🔧 DIAGNOSTIC: Commercial classification completed: is_commercial={self.is_commercial}")
-            
-            self._detect_diesel()
-            diagnostic_logger.info(f"🔧 DIAGNOSTIC: Diesel detection completed: is_diesel={self.is_diesel}")
-            
-            diagnostic_logger.info(f"🔧 DIAGNOSTIC: VehicleIdentification __post_init__ COMPLETED: {self.vin}")
-        except Exception as e:
-            import traceback
-            diagnostic_logger = logging.getLogger("diagnostic")
-            diagnostic_logger.error(f"🔧 DIAGNOSTIC: VehicleIdentification __post_init__ ERROR: {self.vin}")
-            diagnostic_logger.error(f"🔧 DIAGNOSTIC: ERROR TYPE: {type(e).__name__}")
-            diagnostic_logger.error(f"🔧 DIAGNOSTIC: ERROR MESSAGE: {str(e)}")
-            diagnostic_logger.error(f"🔧 DIAGNOSTIC: ERROR TRACEBACK: {traceback.format_exc()}")
-            raise  # Re-raise the exception
+        self._process_gvwr()
+        self._classify_commercial()
+        self._detect_diesel()
     
     def _process_gvwr(self):
         """Extract numeric GVWR value and classify commercial category."""
@@ -234,24 +212,33 @@ class VehicleIdentification(BaseModel):
 @dataclass
 class FuelEconomyData(BaseModel):
     """Fuel economy data from FuelEconomy.gov API."""
-    
+
     # Key efficiency metrics
     city_mpg: float = 0.0
     highway_mpg: float = 0.0
     combined_mpg: float = 0.0
-    
+
+    # MPG data provenance — who provided this MPG value.
+    # Values: "" (unknown/API), "FuelEconomy.gov", "Fuelly (community)",
+    #         "EPA SmartWay", "Ford Commercial", "EPA Class Estimate", "Manual Override"
+    mpg_source: str = ""
+
+    # Whether the MPG value is an estimate rather than a measured/published figure.
+    # True for EPA class-average fallbacks.  False for API or scraper data.
+    mpg_is_estimate: bool = False
+
     # CO2 emissions
     co2_primary: float = 0.0  # g/mile
     co2_alt: float = 0.0  # g/mile for alternative fuel
-    
+
     # Alternative fuel data
     alt_fuel_type: str = ""
     alt_range: float = 0.0  # miles
-    
+
     # Other useful fields
     fuel_cost_primary: float = 0.0  # $ annual
     fuel_cost_alt: float = 0.0  # $ annual
-    
+
     # Raw data from API
     raw_data: Dict[str, Any] = field(default_factory=dict)
     
@@ -266,6 +253,11 @@ class FuelEconomyData(BaseModel):
         self.city_mpg = float(self.raw_data.get('city08', 0) or 0)
         self.highway_mpg = float(self.raw_data.get('highway08', 0) or 0)
         self.combined_mpg = float(self.raw_data.get('comb08', 0) or 0)
+
+        # Tag source when MPG comes from FuelEconomy.gov API
+        if self.combined_mpg > 0 and not self.mpg_source:
+            self.mpg_source = "FuelEconomy.gov"
+            self.mpg_is_estimate = False
         
         # CO2 data
         self.co2_primary = float(self.raw_data.get('co2TailpipeGpm', 0) or 0)
@@ -628,10 +620,26 @@ class FleetVehicle(BaseModel):
         self.custom_fields[field_name] = value
         return True
     
+    @staticmethod
+    def _fmt_mpg(value: float) -> str:
+        """Format MPG value for display."""
+        if value <= 0:
+            return ""
+        return f"{value:.1f}" if value != int(value) else str(int(value))
+
+    @staticmethod
+    def _fmt_number(value: float, decimals: int = 0) -> str:
+        """Format a number with thousand separators."""
+        if value <= 0:
+            return ""
+        if decimals == 0:
+            return f"{int(value):,}"
+        return f"{value:,.{decimals}f}"
+
     def to_row_dict(self) -> Dict[str, Any]:
         """
         Convert to a flattened dictionary for table display or export.
-        
+
         Returns:
             Dictionary with all fields flattened to a single level
         """
@@ -643,28 +651,31 @@ class FleetVehicle(BaseModel):
             "FuelTypePrimary": self.vehicle_id.fuel_type,
             "BodyClass": self.vehicle_id.body_class,
             "GVWR": self.vehicle_id.gvwr,
-            "MPG City": str(self.fuel_economy.city_mpg),
-            "MPG Highway": str(self.fuel_economy.highway_mpg),
-            "MPG Combined": str(self.fuel_economy.combined_mpg),
-            "CO2 emissions": str(self.fuel_economy.co2_primary),
-            "co2A": str(self.fuel_economy.co2_alt),
-            "rangeA": str(self.fuel_economy.alt_range),
-            "Odometer": str(self.odometer),
-            "Annual Mileage": str(self.annual_mileage),
+            "MPG City": self._fmt_mpg(self.fuel_economy.city_mpg),
+            "MPG Highway": self._fmt_mpg(self.fuel_economy.highway_mpg),
+            "MPG Combined": self._fmt_mpg(self.fuel_economy.combined_mpg),
+            "MPG Source": self.fuel_economy.mpg_source,
+            "MPG Estimated": "Yes" if self.fuel_economy.mpg_is_estimate else ("" if not self.fuel_economy.mpg_source else "No"),
+            "CO2 emissions": self._fmt_number(self.fuel_economy.co2_primary, 1) if self.fuel_economy.co2_primary > 0 else "",
+            "co2A": self._fmt_number(self.fuel_economy.co2_alt, 1) if self.fuel_economy.co2_alt > 0 else "",
+            "rangeA": self._fmt_number(self.fuel_economy.alt_range) if self.fuel_economy.alt_range > 0 else "",
+            "Odometer": self._fmt_number(self.odometer),
+            "Annual Mileage": self._fmt_number(self.annual_mileage),
             "Asset ID": self.asset_id,
             "Department": self.department,
             "Location": self.location,
             "Assumed Vehicle (Text)": self.assumed_vehicle_text,
             "Assumed Vehicle (ID)": self.assumed_vehicle_id,
-            
-            # Enhanced fields for Step 10
+
+            # Quality, matching, and status
+            "Match Confidence": f"{self.match_confidence:.0f}%" if self.match_confidence > 0 else "",
             "Data Quality": f"{self.data_quality_score:.0f}%",
             "Processing Status": "Success" if self.processing_success else "Failed",
             "Processing Error": self.processing_error,
-            
-            # Enhanced commercial vehicle fields for Step 12
+
+            # Commercial vehicle fields
             "Commercial Category": self.vehicle_id.commercial_category,
-            "GVWR (lbs)": str(int(self.vehicle_id.gvwr_pounds)) if self.vehicle_id.gvwr_pounds > 0 else "",
+            "GVWR (lbs)": self._fmt_number(self.vehicle_id.gvwr_pounds),
             "Engine HP": self.vehicle_id.engine_power_hp,
             "Engine Type": self.vehicle_id.engine_type,
             "FuelTypeSecondary": self.vehicle_id.fuel_type_secondary,
@@ -673,7 +684,17 @@ class FleetVehicle(BaseModel):
             "Trim": self.vehicle_id.trim,
             "Is Diesel": "Yes" if self.vehicle_id.is_diesel else "No",
             "Is Commercial": "Yes" if self.vehicle_id.is_commercial else "No",
-            "Commercial Summary": self.vehicle_id.commercial_summary
+            "Commercial Summary": self.vehicle_id.commercial_summary,
+
+            # ACF compliance & electrification timeline (populated by processor)
+            "ACF Category": self.custom_fields.get("ACF Category", ""),
+            "ACF Detail": self.custom_fields.get("ACF Detail", ""),
+            "ACF Relevance": self.custom_fields.get("ACF Relevance", ""),
+            "Proposed EV Year": self.custom_fields.get("Proposed EV Year", ""),
+            "EV Year Reason": self.custom_fields.get("EV Year Reason", ""),
+
+            # Fuel type mismatch indicator (diesel VIN matched to gasoline MPG)
+            "Fuel Type Mismatch": self.custom_fields.get("Fuel Type Mismatch", ""),
         }
         
         # Add commercial vehicle specifications from web scraping
@@ -715,9 +736,9 @@ class FleetVehicle(BaseModel):
             if key not in result:
                 result[key] = str(value)
         
-        # Add custom fields
+        # Add custom fields (exclude internal implementation details)
         for key, value in self.custom_fields.items():
-            if key not in result:
+            if key not in result and not key.startswith("_"):
                 result[key] = str(value)
         
         return result
@@ -729,12 +750,14 @@ class FleetVehicle(BaseModel):
 @dataclass
 class Fleet(BaseModel):
     """Collection of vehicles with fleet-level metadata and analysis."""
-    
+
     name: str
     vehicles: List[FleetVehicle] = field(default_factory=list)
     creation_date: datetime.datetime = field(default_factory=datetime.datetime.now)
     last_modified: datetime.datetime = field(default_factory=datetime.datetime.now)
     notes: str = ""
+    fleet_type: str = "hpf"   # "hpf", "non_hpf", or "state_agency" — controls ACF deadlines
+    max_vehicles_per_year: int = 0  # 0 = no cap (auto even-spread); >0 = greedy-fill cap
     
     @property
     def size(self) -> int:
@@ -932,9 +955,12 @@ class ElectrificationAnalysis(BaseModel):
     
     # Vehicle specific results
     vehicle_results: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    
+
     # Prioritized electrification list
     prioritized_vehicles: List[str] = field(default_factory=list)
+
+    # Fleet-wide aggregate year-by-year cash flows (Phase 9A)
+    fleet_cash_flows: List[Dict[str, Any]] = field(default_factory=list)
 
 @dataclass
 class ChargingAnalysis(BaseModel):
@@ -954,6 +980,18 @@ class ChargingAnalysis(BaseModel):
     max_power_required: float = 0.0  # kW
     recommended_layout: Dict[str, Any] = field(default_factory=dict)
     estimated_installation_cost: float = 0.0  # $
+
+    # Extended results (Phase 28)
+    hourly_load_kw: List[float] = field(default_factory=lambda: [0.0] * 24)
+    facility_breakdown: List[Dict[str, Any]] = field(default_factory=list)
+    daily_energy_kwh: float = 0.0
+    charging_hours: float = 0.0
+
+    # Utility rate fields (populated when rate section is applied)
+    state_code: str = ""
+    electricity_price_per_kwh: float = 0.0
+    demand_charge_per_kw_month: float = 0.0
+    estimated_annual_charging_cost: float = 0.0
 
 @dataclass
 class EmissionsInventory(BaseModel):
@@ -980,6 +1018,9 @@ class EmissionsInventory(BaseModel):
     reduction_target: float = 0.0  # %
     projected_emissions: Dict[int, float] = field(default_factory=dict)
 
+    # Whether historical/projected data is synthetic (fabricated for illustration)
+    is_synthetic: bool = False
+
 ###############################################################################
 # API Response Models
 ###############################################################################
@@ -995,95 +1036,31 @@ class VinDecoderResponse(BaseModel):
     
     def to_vehicle_id(self) -> VehicleIdentification:
         """Convert API response to VehicleIdentification object."""
-        # Add diagnostic logging for data extraction
-        diagnostic_logger = logging.getLogger("diagnostic")
-        diagnostic_logger.info(f"=== CONVERTING VIN RESPONSE TO VEHICLE ID: {self.vin} ===")
-        
         if not self.success or not self.data:
-            diagnostic_logger.error(f"VIN RESPONSE CONVERSION FAILED: Success={self.success}, HasData={bool(self.data)}")
             return VehicleIdentification(vin=self.vin)
-        
-        # Extract core fields with logging
-        year = self.data.get("ModelYear", "")
-        make = self.data.get("Make", "")
-        model = self.data.get("Model", "")
-        fuel_type = self.data.get("FuelTypePrimary", "")
-        body_class = self.data.get("BodyClass", "")
-        gvwr = self.data.get("GVWR", "")
-        
-        diagnostic_logger.info(f"CORE FIELDS EXTRACTED:")
-        diagnostic_logger.info(f"  Year: '{year}'")
-        diagnostic_logger.info(f"  Make: '{make}'")
-        diagnostic_logger.info(f"  Model: '{model}'")
-        diagnostic_logger.info(f"  FuelType: '{fuel_type}'")
-        diagnostic_logger.info(f"  BodyClass: '{body_class}'")
-        diagnostic_logger.info(f"  GVWR: '{gvwr}'")
-        
-        # Extract additional fields with logging
-        engine_displacement = self.data.get("DisplacementL", "")
-        engine_cylinders = self.data.get("EngineCylinders", "")
-        drive_type = self.data.get("DriveType", "")
-        transmission = self.data.get("TransmissionStyle", "")
-        
-        diagnostic_logger.info(f"ADDITIONAL FIELDS EXTRACTED:")
-        diagnostic_logger.info(f"  EngineDisplacement: '{engine_displacement}'")
-        diagnostic_logger.info(f"  EngineCylinders: '{engine_cylinders}'")
-        diagnostic_logger.info(f"  DriveType: '{drive_type}'")
-        diagnostic_logger.info(f"  Transmission: '{transmission}'")
-        
-        # Extract enhanced commercial vehicle fields
-        engine_power_hp = self.data.get("EngineHP", "")
-        engine_power_kw = self.data.get("EngineKW", "")
-        engine_type = self.data.get("EngineConfiguration", "")
-        fuel_type_secondary = self.data.get("FuelTypeSecondary", "")
-        vehicle_class = self.data.get("VehicleType", "")
-        
-        diagnostic_logger.info(f"COMMERCIAL FIELDS EXTRACTED:")
-        diagnostic_logger.info(f"  EngineHP: '{engine_power_hp}'")
-        diagnostic_logger.info(f"  EngineType: '{engine_type}'")
-        diagnostic_logger.info(f"  VehicleClass: '{vehicle_class}'")
-        diagnostic_logger.info(f"  FuelTypeSecondary: '{fuel_type_secondary}'")
-        
-        # Check for missing critical fields
-        missing_fields = []
-        if not year: missing_fields.append("ModelYear")
-        if not make: missing_fields.append("Make")
-        if not model: missing_fields.append("Model")
-        
-        if missing_fields:
-            diagnostic_logger.error(f"CRITICAL FIELDS MISSING: {missing_fields}")
-        else:
-            diagnostic_logger.info(f"ALL CRITICAL FIELDS PRESENT")
-        
-        vehicle_id = VehicleIdentification(
+
+        return VehicleIdentification(
             vin=self.vin,
-            year=year,
-            make=make,
-            model=model,
-            fuel_type=fuel_type,
-            body_class=body_class,
-            gvwr=gvwr,
-            engine_displacement=engine_displacement,
-            engine_cylinders=engine_cylinders,
-            drive_type=drive_type,
-            transmission=transmission,
-            
-            # Enhanced commercial vehicle fields for Step 12
-            gvwr_raw=gvwr,
-            engine_power_hp=engine_power_hp,
-            engine_power_kw=engine_power_kw,
-            engine_type=engine_type,
-            fuel_type_secondary=fuel_type_secondary,
-            vehicle_class=vehicle_class,
+            year=self.data.get("ModelYear", ""),
+            make=self.data.get("Make", ""),
+            model=self.data.get("Model", ""),
+            fuel_type=self.data.get("FuelTypePrimary", ""),
+            body_class=self.data.get("BodyClass", ""),
+            gvwr=self.data.get("GVWR", ""),
+            engine_displacement=self.data.get("DisplacementL", ""),
+            engine_cylinders=self.data.get("EngineCylinders", ""),
+            drive_type=self.data.get("DriveType", ""),
+            transmission=self.data.get("TransmissionStyle", ""),
+            gvwr_raw=self.data.get("GVWR", ""),
+            engine_power_hp=self.data.get("EngineHP", ""),
+            engine_power_kw=self.data.get("EngineKW", ""),
+            engine_type=self.data.get("EngineConfiguration", ""),
+            fuel_type_secondary=self.data.get("FuelTypeSecondary", ""),
+            vehicle_class=self.data.get("VehicleType", ""),
             plant_country=self.data.get("PlantCountry", ""),
             series=self.data.get("Series", ""),
             trim=self.data.get("Trim", "")
         )
-        
-        diagnostic_logger.info(f"VEHICLE ID CREATION SUCCESS: {self.vin}")
-        diagnostic_logger.info(f"=== VIN RESPONSE CONVERSION COMPLETE ===")
-        
-        return vehicle_id
 
 @dataclass
 class FuelEconomyResponse(BaseModel):
@@ -1383,8 +1360,51 @@ class DataQualityAnalysis(BaseModel):
     def _get_top_complete_fields(self) -> List[str]:
         """Get the top 5 most complete fields."""
         sorted_fields = sorted(
-            self.completeness_by_field.items(), 
-            key=lambda x: x[1], 
+            self.completeness_by_field.items(),
+            key=lambda x: x[1],
             reverse=True
         )
         return [f"{field} ({pct:.1f}%)" for field, pct in sorted_fields[:5]]
+
+
+###############################################################################
+# Presentation Profile
+###############################################################################
+
+@dataclass
+class PresentationProfile(BaseModel):
+    """Per-fleet presentation profile: client info, consultant contacts, content."""
+
+    # Client info
+    client_name: str = ""
+    meeting_date: str = ""               # e.g. "March 5th, 2026"
+    presentation_type: str = "Kickoff"   # Kickoff / Update 1 / Update 2 / Final
+
+    # Presenter (the analyst building the deck)
+    presenter_name: str = ""
+    presenter_title: str = ""
+    presenter_company: str = ""
+
+    # Partner 1 contact (e.g. utility partner)
+    partner_1_name: str = ""
+    partner_1_title: str = ""
+    partner_1_org: str = ""
+    partner_1_email: str = ""
+
+    # Partner 2 contact (optional)
+    partner_2_name: str = ""
+    partner_2_title: str = ""
+    partner_2_org: str = ""
+    partner_2_email: str = ""
+
+    # Editable consulting content (one item per element)
+    agenda_items: List[str] = field(default_factory=list)
+    data_needs_items: List[str] = field(default_factory=list)
+    next_steps_items: List[str] = field(default_factory=list)
+
+    # Slide selection & order
+    included_slides: List[str] = field(default_factory=list)   # ordered list of slide IDs
+    optional_slides: List[str] = field(default_factory=list)   # extra slides to append
+
+    # Template override (None = use DEFAULT_TEMPLATE_PATH)
+    template_path: Optional[str] = None

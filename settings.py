@@ -15,7 +15,7 @@ from typing import Dict, Any
 # Application Information
 ###############################################################################
 APP_NAME = "Fleet Electrification Analyzer"
-APP_VERSION = "3.0.1"
+APP_VERSION = "3.0.11"
 APP_DESCRIPTION = "A tool for analyzing fleet vehicles and planning electrification strategies"
 APP_AUTHOR = "Fleet Analytics"
 
@@ -29,15 +29,32 @@ CACHE_DIR = DATA_DIR / "cache"
 EXPORT_DIR = DATA_DIR / "exports"
 LOG_DIR = DATA_DIR / "logs"
 TEMP_DIR = DATA_DIR / "temp"
+ASSETS_DIR = BASE_DIR / "assets"
 
 # Ensure directories exist
-for directory in [DATA_DIR, CACHE_DIR, EXPORT_DIR, LOG_DIR, TEMP_DIR]:
+for directory in [DATA_DIR, CACHE_DIR, EXPORT_DIR, LOG_DIR, TEMP_DIR, ASSETS_DIR]:
     directory.mkdir(exist_ok=True, parents=True)
 
 # Default file paths
 DEFAULT_CONFIG_FILE = DATA_DIR / "config.json"
 DEFAULT_CACHE_FILE = CACHE_DIR / "api_cache.json"
 DEFAULT_LOG_FILE = LOG_DIR / "app.log"
+DEFAULT_DB_FILE = DATA_DIR / "vehicle_database.db"
+
+# Presentation assets
+DEFAULT_TEMPLATE_PATH = str(ASSETS_DIR / "template_default.pptx")
+PROFILE_SIDECAR_SUFFIX = "_profile.json"
+
+# Ordered list of slide IDs in the default template (index matches template slide order)
+TEMPLATE_SLIDE_IDS = [
+    "cover", "agenda", "carb_overview", "acf_scenarios", "acf_exemptions",
+    "key_findings", "timeline_chart", "emissions_chart", "incentives",
+    "data_needs", "next_steps", "contact", "appendix",
+    "infra_costs_chart", "tco_chart",
+]
+
+# Slides selected by default (all template slides on)
+DEFAULT_SLIDE_IDS = list(TEMPLATE_SLIDE_IDS)
 
 ###############################################################################
 # Logging Configuration
@@ -140,19 +157,6 @@ COMMERCIAL_VEHICLE_HELP = {
 }
 
 ###############################################################################
-# Cache Management Configuration
-###############################################################################
-# Intelligent cache settings for optimal performance
-CACHE_CONFIG = {
-    "auto_cleanup_enabled": True,     # Automatically clean old cache entries
-    "cleanup_on_startup": True,       # Clean cache when app starts
-    "max_entries": 10000,            # Maximum cache entries before cleanup
-    "compression_enabled": True,      # Compress cache data
-    "memory_cache_size": 1000,       # In-memory cache entries
-    "disk_cache_fallback": True,     # Use disk when memory is full
-}
-
-###############################################################################
 # Vehicle Matching Parameters
 ###############################################################################
 # Criteria weights for vehicle matching confidence
@@ -216,7 +220,17 @@ CHART_TYPES = [
     "Fuel Type Distribution",
     "Annual Cost Comparison",
     "Fleet Age Distribution",
-    "Electrification Potential"
+    "Electrification Potential",
+    "Emissions Reduction",
+    "ROI Analysis",
+    "Charging Infrastructure",
+    "Emissions Inventory",
+    "Emissions Trends",
+    "Emissions by Department",
+    "Emissions by Vehicle Type",
+    "Fleet Cash Flow",
+    "Replacement Priority",
+    "Scenario Comparison",
 ]
 
 # Default values for analysis calculations
@@ -228,6 +242,32 @@ DEFAULT_VEHICLE_LIFESPAN = 12     # years
 DEFAULT_BATTERY_DEGRADATION = 2.0 # %/year
 DEFAULT_ICE_MAINTENANCE = 0.10    # $/mile
 DEFAULT_EV_MAINTENANCE = 0.06     # $/mile
+
+# Phase 9A: Enhanced TCO parameters
+DEFAULT_FUEL_ESCALATION_RATE = 3.0    # % annual increase in fuel/electricity prices
+DEFAULT_INCENTIVE_AMOUNT = 0.0        # $ federal/state incentive (subtracted from EV price)
+DEFAULT_INFRASTRUCTURE_COST_PER_VEHICLE = 0.0  # $ charging infrastructure amortized per vehicle
+DEFAULT_RESIDUAL_VALUE_ICE_PCT = 15.0  # % of purchase price at end of analysis period
+DEFAULT_RESIDUAL_VALUE_EV_PCT = 20.0   # % of purchase price at end of analysis period (battery has value)
+
+# Phase 15: EPA class-average MPG estimates by GVWR class.
+# Used as a last-resort fallback when FuelEconomy.gov and all scrapers fail.
+# Source: EPA Automotive Trends Report & DOE fleet averages.
+# These are clearly flagged as estimates (mpg_is_estimate=True) in results.
+# Keys are (lower_lbs_exclusive, upper_lbs_inclusive) GVWR ranges.
+# Analysts may manually override any MPG value in the results table.
+EPA_CLASS_AVERAGE_MPG = {
+    # Light-duty (FuelEconomy.gov should cover these; fallback included for completeness)
+    (0, 6000):     {"combined": 28.0, "city": 25.0, "highway": 32.0, "label": "Light-Duty Car/SUV"},
+    (6000, 8500):  {"combined": 20.0, "city": 17.0, "highway": 23.0, "label": "Light-Duty Truck/Van"},
+    # Medium-duty — FuelEconomy.gov coverage is sparse
+    (8500, 14000): {"combined": 16.0, "city": 13.0, "highway": 18.0, "label": "Class 3-4 Medium-Duty"},
+    (14000, 19500):{"combined": 12.0, "city": 10.0, "highway": 14.0, "label": "Class 4-5 Medium-Duty"},
+    # Heavy-duty
+    (19500, 26000):{"combined": 10.0, "city":  8.5, "highway": 11.5, "label": "Class 6 Heavy-Duty"},
+    (26000, 33000):{"combined":  8.5, "city":  7.0, "highway": 10.0, "label": "Class 7 Heavy-Duty"},
+    (33000, 999999):{"combined": 6.5, "city":  5.5, "highway":  7.5, "label": "Class 8 Heavy-Duty"},
+}
 
 ###############################################################################
 # Field Mappings & Conversions
@@ -266,7 +306,27 @@ COLUMN_NAME_MAP = {
     "Is Diesel": "Diesel Engine",
     "Is Commercial": "Commercial Vehicle",
     "Commercial Summary": "Commercial Summary",
-    
+
+    # Match quality & MPG provenance
+    "Match Confidence": "Match Confidence",
+    "Fuel Type Mismatch": "Fuel Type Mismatch",
+    "MPG Source": "MPG Source",
+    "MPG Estimated": "MPG Estimated",
+    "EPA Class Est. MPG": "EPA Class Est. MPG",
+
+    # ACF compliance & electrification timeline
+    "ACF Category": "ACF Compliance",
+    "ACF Detail": "ACF Detail",
+    "ACF Relevance": "ACF Mandate Status",
+    "Proposed EV Year": "Proposed EV Year",
+    "EV Year Reason": "EV Year Reason",
+
+    # EV equivalent matching (Phase 9B — hidden pending accuracy review; see CLAUDE.md)
+    "EV Equivalent": "EV Equivalent",
+    "EV MSRP Range": "EV MSRP Range",
+    "EV EPA Range": "EV EPA Range",
+    "EV Fit Score": "EV Match Score",
+
     # Enhanced Commercial Vehicle Specifications (from web scraping)
     "payload_capacity_lbs": "Payload Capacity (lbs)",
     "towing_capacity_lbs": "Towing Capacity (lbs)",
@@ -343,19 +403,29 @@ FIELD_CATEGORIES = {
 # Initial visible columns in the results table (optimized for commercial fleet analysis)
 DEFAULT_VISIBLE_COLUMNS = [
     # Essential identification
-    "VIN", "Year", "Make", "Model", 
-    
-    # Commercial classification (key for fleet analysis)
-    "Commercial Category", "GVWR (lbs)", "Vehicle Class",
-    
-    # Operational capabilities (critical for commercial use)
-    "payload_capacity_lbs", "towing_capacity_lbs", "duty_cycle",
-    
-    # Electrification potential (primary goal)
-    "electrification_suitability", "MPG Combined", "FuelTypePrimary",
-    
-    # Fleet management basics
-    "Annual Mileage", "Asset ID", "Data Quality", "Processing Status"
+    "VIN", "Year", "Make", "Model",
+
+    # Key vehicle specs
+    "FuelTypePrimary", "BodyClass",
+
+    # Fuel economy — the core value of the app
+    "MPG Combined", "MPG City", "MPG Highway",
+    "MPG Source",        # Where the MPG came from (FuelEconomy.gov / scraper / EPA estimate)
+    "CO2 emissions",
+
+    # Commercial classification
+    "Commercial Category", "GVWR", "GVWR (lbs)",
+
+    # Fleet management
+    "Asset ID", "Department",
+
+    # ACF compliance & electrification
+    "ACF Category", "ACF Detail", "Proposed EV Year",
+    "EV Year Reason",    # Why the vehicle got its year or N/A
+    "ACF Relevance",     # Plain-English ACF mandate status (Phase 15)
+
+    # Data quality & matching
+    "Match Confidence", "Data Quality", "Processing Status"
 ]
 
 # Additional data column mappings for common fleet management field names
@@ -429,6 +499,13 @@ ADDITIONAL_DATA_MAPPINGS = {
 }
 
 ###############################################################################
+# Electrification Timeline
+###############################################################################
+# Final year of the fleet electrification timeline (inclusive).
+# For CA state & local government fleets, 2040 is a common planning horizon.
+DEFAULT_ELECTRIFICATION_END_YEAR = 2040
+
+###############################################################################
 # Cache Configuration
 ###############################################################################
 CACHE_ENABLED = True
@@ -451,9 +528,6 @@ DEFAULT_API_CACHE = {
 EXPORT_FORMATS = {
     "CSV": ".csv",
     "Excel": ".xlsx",
-    "PDF": ".pdf",
-    "JSON": ".json",
-    "HTML": ".html"
 }
 
 # Default export settings

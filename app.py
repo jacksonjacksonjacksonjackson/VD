@@ -115,9 +115,7 @@ def run_batch_mode(args):
     )
     
     # Wait for processing to complete (preventing program exit)
-    import time
-    while processor.current_pipeline and processor.current_pipeline.processing_thread and processor.current_pipeline.processing_thread.is_alive():
-        time.sleep(0.1)
+    processor._done_event.wait()
     
     logger.info(f"Batch processing complete. Results saved to {args.output}")
     return 0
@@ -137,7 +135,15 @@ def run_gui_mode(args):
         logger.warning("Drag-and-drop support not available (tkinterdnd2 not installed)")
     
     root.title(f"{APP_NAME} v{APP_VERSION}")
-    root.geometry(DEFAULT_WINDOW_SIZE)
+    
+    # Set window size (good default for demo, scales down to 1280x800)
+    root.geometry("1400x900")
+    root.minsize(1280, 800)  # Minimum size for proper layout
+    
+    # Initialize modern theme
+    from ui.theme import initialize_theme
+    initialize_theme()
+    logger.info("Initialized professional UI theme")
     
     # Create main application window
     app = MainWindow(root)

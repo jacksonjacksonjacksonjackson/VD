@@ -2,7 +2,7 @@
 reports.py
 
 Report generation and exports for the Fleet Electrification Analyzer.
-Provides functions to create various report formats (PDF, Excel, etc.).
+Provides functions to create various report formats (CSV, Excel).
 """
 
 import os
@@ -38,16 +38,6 @@ except ImportError:
     EXCEL_AVAILABLE = False
     logger.warning("XlsxWriter not available. Excel export will be disabled.")
 
-try:
-    from reportlab.lib.pagesizes import letter, A4
-    from reportlab.lib import colors
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import inch
-    PDF_AVAILABLE = True
-except ImportError:
-    PDF_AVAILABLE = False
-    logger.warning("ReportLab not available. PDF export will be disabled.")
 
 ###############################################################################
 # Report Generator Base Class
@@ -85,14 +75,17 @@ class ReportGenerator:
 class CsvReportGenerator(ReportGenerator):
     """Generate CSV reports from fleet data."""
     
-    def generate(self, fleet: Union[Fleet, List[FleetVehicle]], fields: Optional[List[str]] = None) -> bool:
+    def generate(self, fleet: Union[Fleet, List[FleetVehicle]], fields: Optional[List[str]] = None,
+                 **kwargs) -> bool:
         """
         Generate a CSV report from fleet data.
-        
+
         Args:
             fleet: Fleet object or list of vehicles
             fields: List of fields to include (None for default fields)
-            
+            **kwargs: Accepts (and ignores) analysis, charging, emissions for API
+                      compatibility with ExportCoordinator
+
         Returns:
             True if successful, False otherwise
         """
@@ -139,11 +132,12 @@ class CsvReportGenerator(ReportGenerator):
 class ExcelReportGenerator(ReportGenerator):
     """Generate Excel reports from fleet data with charts and analysis."""
     
-    def generate(self, fleet: Union[Fleet, List[FleetVehicle]], 
+    def generate(self, fleet: Union[Fleet, List[FleetVehicle]],
                analysis: Optional[ElectrificationAnalysis] = None,
                charging: Optional[ChargingAnalysis] = None,
                emissions: Optional[EmissionsInventory] = None,
-               fields: Optional[List[str]] = None) -> bool:
+               fields: Optional[List[str]] = None,
+               timeline_options: Optional[dict] = None) -> bool:
         """
         Generate an Excel report with data, charts, and analysis.
         
@@ -219,7 +213,19 @@ class ExcelReportGenerator(ReportGenerator):
             # Create Emissions Inventory sheet if available
             if emissions:
                 self._create_emissions_sheet(workbook, emissions, title_format, header_format, cell_format, number_format)
-            
+
+            # Phase 9I: Analysis-ready sheets
+            if analysis and hasattr(analysis, 'fleet_cash_flows') and analysis.fleet_cash_flows:
+                self._create_tco_model_sheet(workbook, analysis, vehicles, title_format, header_format, cell_format, number_format)
+
+            self._create_replacement_schedule_sheet(
+                workbook, vehicles,
+                title_format, header_format, cell_format, number_format,
+                timeline_options=timeline_options,
+            )
+
+            self._create_summary_dashboard_sheet(workbook, vehicles, analysis, charging, emissions, title_format, header_format, cell_format, number_format)
+
             # Close workbook to save changes
             workbook.close()
             
@@ -750,330 +756,617 @@ class ExcelReportGenerator(ReportGenerator):
                 row += 1
 
 
+    def _create_tco_model_sheet(self, workbook, analysis, vehicles, title_format, header_format, cell_format, number_format):
+        """Create TCO Model sheet with a live-formula assumptions block and year-by-year cash flows.
+
+        Layout (1-indexed rows as Excel sees them):
+          Row 1       : Title (merged A1:J1)
+          Row 2       : blank
+          Row 3       : "Assumptions" header
+          Rows 4-14   : Editable assumption cells in column B (yellow), labels in column A
+          Rows 15-16  : Read-only helper cells (avg fleet MPG, avg annual mileage)
+          Row 17      : blank
+          Row 18      : Column headers for the cash-flow table
+          Rows 19+    : One row per year; all cost/savings cells use =formulas referencing B4:B16
+          Last rows   : Summary KPIs (also formula-based)
+
+        Assumption cells (all in column B):
+          B4  = Gas price ($/gal)               ← editable (yellow)
+          B5  = Electricity price ($/kWh)        ← editable
+          B6  = EV efficiency (kWh/mile)         ← editable
+          B7  = ICE maintenance ($/mile)         ← editable
+          B8  = EV maintenance ($/mile)          ← editable
+          B9  = Fuel escalation rate (% / yr)    ← editable
+          B10 = Discount rate (%)                ← editable
+          B11 = Battery degradation (% / yr)     ← editable
+          B12 = Infrastructure cost/vehicle ($)  ← editable
+          B13 = Fleet size (vehicles)            ← editable
+          B14 = Analysis period (years)          ← editable
+          B15 = Avg fleet MPG                    ← read-only (fleet aggregate)
+          B16 = Avg annual mileage (miles)       ← read-only (fleet aggregate)
+
+        Anchor cells K–O hold Year-1 base cost formulas that reference B4:B16.
+        Changing any editable assumption recalculates the entire model.
+        """
+        from settings import (
+            DEFAULT_GAS_PRICE, DEFAULT_ELECTRICITY_PRICE, DEFAULT_EV_EFFICIENCY,
+            DEFAULT_ICE_MAINTENANCE, DEFAULT_EV_MAINTENANCE,
+            DEFAULT_FUEL_ESCALATION_RATE, DEFAULT_BATTERY_DEGRADATION,
+            DEFAULT_INFRASTRUCTURE_COST_PER_VEHICLE
+        )
+
+        ws = workbook.add_worksheet("TCO Model")
+
+        # ── Formats ─────────────────────────────────────────────────────────────
+        currency_fmt = workbook.add_format({'border': 1, 'num_format': '$#,##0', 'align': 'right'})
+        pct_fmt      = workbook.add_format({'border': 1, 'num_format': '0.00%', 'align': 'right'})
+        num_fmt      = workbook.add_format({'border': 1, 'num_format': '#,##0.00', 'align': 'right'})
+        input_fmt    = workbook.add_format({
+            'border': 2, 'num_format': '#,##0.00', 'align': 'right',
+            'bg_color': '#EAF2FB', 'bold': False
+        })
+        input_pct_fmt = workbook.add_format({
+            'border': 2, 'num_format': '0.00', 'align': 'right',
+            'bg_color': '#EAF2FB'
+        })
+        input_int_fmt = workbook.add_format({
+            'border': 2, 'num_format': '#,##0', 'align': 'right',
+            'bg_color': '#EAF2FB'
+        })
+        label_fmt    = workbook.add_format({'border': 1, 'bold': False, 'align': 'left'})
+        note_fmt     = workbook.add_format({'border': 1, 'italic': True, 'font_color': '#2471A3'})
+        payback_fmt  = workbook.add_format({
+            'border': 1, 'bold': True,
+            'bg_color': '#D5F5E3', 'font_color': '#1E8449'
+        })
+        hint_fmt     = workbook.add_format({
+            'italic': True, 'font_size': 9, 'font_color': '#7F8C8D'
+        })
+        kpi_title_fmt = workbook.add_format({
+            'bold': True, 'bg_color': '#3C465A',
+            'font_color': 'white', 'border': 1, 'align': 'center'
+        })
+
+        # ── Column widths ────────────────────────────────────────────────────────
+        ws.set_column('A:A', 30)   # Label
+        ws.set_column('B:B', 18)   # Input / Year
+        ws.set_column('C:C', 18)   # ICE Annual
+        ws.set_column('D:D', 18)   # EV Annual
+        ws.set_column('E:E', 18)   # Annual Savings
+        ws.set_column('F:F', 18)   # ICE Cumulative
+        ws.set_column('G:G', 18)   # EV Cumulative
+        ws.set_column('H:H', 18)   # Cumulative Savings
+        ws.set_column('I:I', 20)   # NPV Savings
+        ws.set_column('J:J', 22)   # Notes
+
+        # ── Title ────────────────────────────────────────────────────────────────
+        ws.merge_range('A1:J1', "Fleet TCO Model — Year-by-Year Cash Flows (Live Formula Model)", title_format)
+
+        # ── Assumptions block (rows 3–15, 1-indexed) ─────────────────────────────
+        # In xlsxwriter, row/col are 0-indexed: row 3 (1-idx) = row 2 (0-idx)
+        ASSUMP_HEADER_ROW = 2   # 0-idx → Excel row 3
+        ASSUMP_START_ROW  = 3   # 0-idx → Excel row 4  (first input row)
+
+        ws.merge_range(ASSUMP_HEADER_ROW, 0, ASSUMP_HEADER_ROW, 9,
+                       "⚙ Assumptions — Edit yellow cells to recalculate the model", header_format)
+        ws.write(ASSUMP_HEADER_ROW + 1, 0,
+                 "Changes to yellow cells instantly update all formula cells below.",
+                 hint_fmt)
+
+        # Derive baseline values from the first vehicle's cash flow data if possible
+        cash_flows = analysis.fleet_cash_flows or []
+        # Read actual params from first year-1 flow if present; fall back to defaults
+        y1 = next((cf for cf in cash_flows if cf.get('year') == 1), {})
+        gas_price_val   = y1.get('gas_price', DEFAULT_GAS_PRICE)
+        elec_price_val  = y1.get('electricity_price', DEFAULT_ELECTRICITY_PRICE)
+        n_years         = max((cf.get('year', 0) for cf in cash_flows), default=0)
+
+        # Compute fleet-level aggregates needed for anchor cell formulas
+        vehicles_with_mpg = [
+            v for v in vehicles
+            if v.fuel_economy and v.fuel_economy.combined_mpg and v.fuel_economy.combined_mpg > 0
+        ]
+        avg_mpg = (
+            sum(v.fuel_economy.combined_mpg for v in vehicles_with_mpg) / len(vehicles_with_mpg)
+            if vehicles_with_mpg else 20.0
+        )
+        vehicles_with_mileage = [
+            v for v in vehicles
+            if getattr(v, 'annual_mileage_miles', None) and v.annual_mileage_miles > 0
+        ]
+        avg_mileage = (
+            sum(v.annual_mileage_miles for v in vehicles_with_mileage) / len(vehicles_with_mileage)
+            if vehicles_with_mileage else 15000.0
+        )
+
+        # Assumption rows: (label, value, format, cell_hint)
+        # First 11 rows are editable (yellow); last 2 are read-only fleet aggregates.
+        assumptions_def = [
+            ("Gas Price ($/gal)",              gas_price_val,                              input_fmt,     "B4"),
+            ("Electricity Price ($/kWh)",       elec_price_val,                             input_fmt,     "B5"),
+            ("EV Efficiency (kWh/mile)",        DEFAULT_EV_EFFICIENCY,                      input_fmt,     "B6"),
+            ("ICE Maintenance ($/mile)",        DEFAULT_ICE_MAINTENANCE,                    input_fmt,     "B7"),
+            ("EV Maintenance ($/mile)",         DEFAULT_EV_MAINTENANCE,                     input_fmt,     "B8"),
+            ("Fuel Escalation Rate (%/yr)",     DEFAULT_FUEL_ESCALATION_RATE,               input_pct_fmt, "B9"),
+            ("Discount Rate (%/yr)",            analysis.discount_rate if hasattr(analysis, 'discount_rate') else 5.0, input_pct_fmt, "B10"),
+            ("Battery Degradation (%/yr)",      DEFAULT_BATTERY_DEGRADATION,                input_pct_fmt, "B11"),
+            ("Infrastructure Cost/Vehicle ($)", DEFAULT_INFRASTRUCTURE_COST_PER_VEHICLE,    input_fmt,     "B12"),
+            ("Fleet Size (vehicles)",           len(vehicles),                              input_int_fmt, "B13"),
+            ("Analysis Period (years)",         n_years or 12,                              input_int_fmt, "B14"),
+            # Read-only fleet aggregates — used by anchor formulas in columns K–O
+            ("Avg Fleet MPG (read-only)",       round(avg_mpg, 2),                          input_fmt,     "B15"),
+            ("Avg Annual Mileage (read-only)",  round(avg_mileage, 0),                      input_int_fmt, "B16"),
+        ]
+
+        # Named cells for formula references (0-indexed row, col 1 = column B)
+        ASSUMP_ROWS = {}  # key → 0-indexed row number
+        for i, (label, value, fmt, cell_hint) in enumerate(assumptions_def):
+            r = ASSUMP_START_ROW + i
+            ws.write(r, 0, label, label_fmt)
+            ws.write(r, 1, value, fmt)
+            ASSUMP_ROWS[cell_hint] = r  # store for formula building
+
+        blank_row = ASSUMP_START_ROW + len(assumptions_def)  # one blank separator row
+
+        # ── Cash-flow table ──────────────────────────────────────────────────────
+        TABLE_HEADER_ROW = blank_row + 1
+        TABLE_DATA_START = TABLE_HEADER_ROW + 1
+
+        col_headers = [
+            "Year", "ICE Annual Cost", "EV Annual Cost", "Annual Savings",
+            "ICE Cumulative", "EV Cumulative", "Cumulative Savings",
+            "NPV Savings (yr)", "Notes"
+        ]
+        for col, h in enumerate(col_headers):
+            ws.write(TABLE_HEADER_ROW, col + 1, h, header_format)
+        # col A (0) left blank on header row — used for row labels in assumption block
+        ws.write(TABLE_HEADER_ROW, 0, "", header_format)
+
+        # Helper: Excel column letter from 0-indexed col number
+        def col_letter(c):
+            letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            return letters[c] if c < 26 else letters[c // 26 - 1] + letters[c % 26]
+
+        # Build assumption cell references (1-indexed Excel addresses)
+        def aref(key):
+            """Return absolute $B$N reference for an assumption cell."""
+            r0 = ASSUMP_ROWS[key]
+            return f"$B${r0 + 1}"   # +1 because Excel rows are 1-indexed
+
+        gas_ref   = aref("B4")
+        elec_ref  = aref("B5")
+        eff_ref   = aref("B6")
+        ice_m_ref = aref("B7")
+        ev_m_ref  = aref("B8")
+        esc_ref   = aref("B9")
+        disc_ref  = aref("B10")
+        batt_ref  = aref("B11")
+        infra_ref = aref("B12")
+        size_ref  = aref("B13")
+        yrs_ref   = aref("B14")
+        mpg_ref   = aref("B15")   # avg fleet MPG (read-only helper)
+        mi_ref    = aref("B16")   # avg annual mileage (read-only helper)
+
+        # We also need per-vehicle MPG average to compute fuel costs.
+        # Since we aggregate across the fleet, use the actual fleet_cash_flows values
+        # for Year 0 purchase and Years 1-N operating formulas.
+        #
+        # Strategy: write the year-0 row as static purchase amounts (no per-unit MPG
+        # formula possible at fleet level), then for years 1-N write formulas that
+        # scale the Year-1 actuals by the escalation / degradation factors.
+        # This gives consultants live escalation / discount sensitivity.
+        #
+        # For ICE and EV base costs we use the Year-1 actuals as anchors; the
+        # formula for year Y scales them by (1 + esc/100)^(Y-1) for fuel and
+        # keeps maintenance flat (no formula for mileage change — KISS).
+
+        # Find year-0 and year-1 cash flows
+        cf0 = next((cf for cf in cash_flows if cf.get('year') == 0), {})
+        cf1 = next((cf for cf in cash_flows if cf.get('year') == 1), {})
+
+        ice_y0_total = cf0.get('ice_total', 0)
+        ev_y0_total  = cf0.get('ev_total', 0)
+
+        # Year-1 component breakdown (fleet aggregate)
+        ice_y1_fuel   = cf1.get('ice_fuel', 0)
+        ice_y1_maint  = cf1.get('ice_maintenance', 0)
+        ev_y1_fuel    = cf1.get('ev_fuel', 0)
+        ev_y1_maint   = cf1.get('ev_maintenance', 0)
+        ev_y1_infra   = cf1.get('ev_infrastructure', 0)
+
+        # Anchor cells: Year-1 base costs as live formulas referencing the assumptions block.
+        # Stored off-screen in columns K-O so they update when consultants change B4:B16.
+        #
+        # Formula logic (fleet-level totals for year 1):
+        #   ICE fuel     = (avg_mileage / avg_mpg) × gas_price × fleet_size
+        #   ICE maint    = avg_mileage × ICE_maintenance_rate × fleet_size
+        #   EV fuel      = avg_mileage × ev_efficiency × electricity_price × fleet_size
+        #   EV maint     = avg_mileage × EV_maintenance_rate × fleet_size
+        #   EV infra     = infra_cost_per_vehicle × fleet_size
+        #
+        # B15 = avg fleet MPG, B16 = avg annual mileage (both stored as read-only helpers above)
+        ANCHOR_COL = 10  # column K (0-indexed)
+        ws.write(TABLE_HEADER_ROW, ANCHOR_COL,     "⟵ Anchor: ICE fuel yr1 (live formula)",  hint_fmt)
+        ws.write(TABLE_HEADER_ROW, ANCHOR_COL + 1, "⟵ Anchor: ICE maint yr1 (live formula)", hint_fmt)
+        ws.write(TABLE_HEADER_ROW, ANCHOR_COL + 2, "⟵ Anchor: EV fuel yr1 (live formula)",   hint_fmt)
+        ws.write(TABLE_HEADER_ROW, ANCHOR_COL + 3, "⟵ Anchor: EV maint yr1 (live formula)",  hint_fmt)
+        ws.write(TABLE_HEADER_ROW, ANCHOR_COL + 4, "⟵ Anchor: EV infra yr1 (live formula)",  hint_fmt)
+
+        ANCHOR_ROW = TABLE_DATA_START  # Year-0 row; anchor formulas go here
+        ws.write_formula(ANCHOR_ROW, ANCHOR_COL,
+                         f"={mi_ref}/{mpg_ref}*{gas_ref}*{size_ref}",
+                         input_fmt, ice_y1_fuel)
+        ws.write_formula(ANCHOR_ROW, ANCHOR_COL + 1,
+                         f"={mi_ref}*{ice_m_ref}*{size_ref}",
+                         input_fmt, ice_y1_maint)
+        ws.write_formula(ANCHOR_ROW, ANCHOR_COL + 2,
+                         f"={mi_ref}*{eff_ref}*{elec_ref}*{size_ref}",
+                         input_fmt, ev_y1_fuel)
+        ws.write_formula(ANCHOR_ROW, ANCHOR_COL + 3,
+                         f"={mi_ref}*{ev_m_ref}*{size_ref}",
+                         input_fmt, ev_y1_maint)
+        ws.write_formula(ANCHOR_ROW, ANCHOR_COL + 4,
+                         f"={infra_ref}*{size_ref}",
+                         input_fmt, ev_y1_infra)
+
+        # Helper cell references
+        def acref(offset):
+            """Absolute reference to anchor cell at ANCHOR_ROW, ANCHOR_COL+offset."""
+            r_excel = ANCHOR_ROW + 1   # 1-indexed
+            c_letter = col_letter(ANCHOR_COL + offset)
+            return f"${c_letter}${r_excel}"
+
+        ice_fuel_anchor   = acref(0)
+        ice_maint_anchor  = acref(1)
+        ev_fuel_anchor    = acref(2)
+        ev_maint_anchor   = acref(3)
+        ev_infra_anchor   = acref(4)
+
+        # ── Write year-by-year rows ──────────────────────────────────────────────
+        # Year 0 row: static purchase costs (no operating formulas)
+        r0_excel = TABLE_DATA_START
+        ws.write(r0_excel, 0, "Year 0 — Purchase", label_fmt)
+        ws.write(r0_excel, 1, 0,           cell_format)          # Year number
+        ws.write(r0_excel, 2, ice_y0_total, currency_fmt)         # ICE Annual (purchase)
+        ws.write(r0_excel, 3, ev_y0_total,  currency_fmt)         # EV Annual (purchase)
+        ws.write_formula(r0_excel, 4, f"={col_letter(2)}{r0_excel+1}-{col_letter(3)}{r0_excel+1}", currency_fmt)  # Savings
+        ws.write(r0_excel, 5, ice_y0_total, currency_fmt)         # ICE Cumulative
+        ws.write(r0_excel, 6, ev_y0_total,  currency_fmt)         # EV Cumulative
+        ws.write_formula(r0_excel, 7, f"={col_letter(5)}{r0_excel+1}-{col_letter(6)}{r0_excel+1}", currency_fmt)
+        ws.write(r0_excel, 8, 0,            currency_fmt)         # NPV
+        ws.write(r0_excel, 9, "Year 0: Purchase costs", note_fmt)
+
+        # Column letter shortcuts for the cash-flow columns (B=1, C=2, ..., I=8)
+        # col index in worksheet: B=1, C=2, D=3, E=4, F=5, G=6, H=7, I=8, J=9
+        C_YEAR    = 1
+        C_ICE_ANN = 2
+        C_EV_ANN  = 3
+        C_ANN_SAV = 4
+        C_ICE_CUM = 5
+        C_EV_CUM  = 6
+        C_CUM_SAV = 7
+        C_NPV     = 8
+        C_NOTE    = 9
+
+        prev_ice_cum_ref = f"{col_letter(C_ICE_CUM)}{r0_excel + 1}"
+        prev_ev_cum_ref  = f"{col_letter(C_EV_CUM)}{r0_excel + 1}"
+        prev_cum_sav_ref = f"{col_letter(C_CUM_SAV)}{r0_excel + 1}"
+
+        n_data_rows = len([cf for cf in cash_flows if cf.get('year', -1) >= 1]) or (n_years or 12)
+
+        for i in range(1, n_data_rows + 1):
+            row = TABLE_DATA_START + i
+            row_excel = row + 1  # 1-indexed
+
+            prev_row_excel = row_excel - 1
+
+            # Escalation factor: (1 + esc%/100)^(year-1)
+            esc_factor = f"(1+{esc_ref}/100)^({i}-1)"
+
+            # Degradation factor for EV efficiency: (1 + batt%/100)*(year-1)
+            # EV fuel = anchor_ev_fuel * (1 + batt%/100)*(year-1) * esc_factor / esc_factor_yr1
+            # Simpler: EV fuel yr Y = (ev_fuel_anchor * (1 + batt_ref/100*(Y-1))) * (1+esc_ref/100)^(Y-1)
+            # anchor is already at yr1 gas/elec prices; we scale fuel by esc and efficiency by batt deg
+            batt_factor = f"(1+{batt_ref}/100*({i}-1))"
+
+            # ICE annual = (ice_fuel_anchor * esc_factor) + ice_maint_anchor
+            ice_ann_formula = f"={ice_fuel_anchor}*{esc_factor}+{ice_maint_anchor}"
+
+            # EV annual = (ev_fuel_anchor * batt_factor * esc_factor) + ev_maint_anchor + ev_infra_anchor
+            ev_ann_formula  = f"={ev_fuel_anchor}*{batt_factor}*{esc_factor}+{ev_maint_anchor}+{ev_infra_anchor}"
+
+            # Annual savings
+            ice_ann_ref = f"{col_letter(C_ICE_ANN)}{row_excel}"
+            ev_ann_ref  = f"{col_letter(C_EV_ANN)}{row_excel}"
+            ann_sav_formula = f"={ice_ann_ref}-{ev_ann_ref}"
+
+            # Cumulative
+            ice_cum_formula = f"={col_letter(C_ICE_CUM)}{prev_row_excel}+{ice_ann_ref}"
+            ev_cum_formula  = f"={col_letter(C_EV_CUM)}{prev_row_excel}+{ev_ann_ref}"
+
+            ice_cum_ref = f"{col_letter(C_ICE_CUM)}{row_excel}"
+            ev_cum_ref  = f"{col_letter(C_EV_CUM)}{row_excel}"
+            cum_sav_formula = f"={ice_cum_ref}-{ev_cum_ref}"
+
+            # NPV of annual savings: ann_sav / (1 + disc%)^year
+            npv_formula = f"={col_letter(C_ANN_SAV)}{row_excel}/(1+{disc_ref}/100)^{i}"
+
+            # Payback note: flag when cumulative savings crosses from negative to positive
+            prev_cum_sav_cell = f"{col_letter(C_CUM_SAV)}{prev_row_excel}"
+            cum_sav_cell      = f"{col_letter(C_CUM_SAV)}{row_excel}"
+            note_formula = (
+                f'=IF(AND({prev_cum_sav_cell}<0,{cum_sav_cell}>=0),"✓ PAYBACK YEAR","")'
+            )
+
+            ws.write(row, 0, f"Year {i}", label_fmt)
+            ws.write(row, C_YEAR,    i,                cell_format)
+            ws.write_formula(row, C_ICE_ANN, ice_ann_formula, currency_fmt)
+            ws.write_formula(row, C_EV_ANN,  ev_ann_formula,  currency_fmt)
+            ws.write_formula(row, C_ANN_SAV, ann_sav_formula, currency_fmt)
+            ws.write_formula(row, C_ICE_CUM, ice_cum_formula, currency_fmt)
+            ws.write_formula(row, C_EV_CUM,  ev_cum_formula,  currency_fmt)
+            ws.write_formula(row, C_CUM_SAV, cum_sav_formula, currency_fmt)
+            ws.write_formula(row, C_NPV,     npv_formula,     currency_fmt)
+            ws.write_formula(row, C_NOTE,    note_formula,    payback_fmt)
+
+        # ── Summary KPIs (formula-based) ──────────────────────────────────────────
+        last_data_row = TABLE_DATA_START + n_data_rows + 1  # 1-indexed Excel row of last data row
+        last_data_row_excel = TABLE_DATA_START + n_data_rows  # 0-indexed
+
+        SUMMARY_START = last_data_row_excel + 2
+        ws.merge_range(SUMMARY_START, 0, SUMMARY_START, 9,
+                       "Summary — Formula-Linked KPIs", header_format)
+
+        ice_cum_last = f"{col_letter(C_ICE_CUM)}{TABLE_DATA_START + n_data_rows + 1}"
+        ev_cum_last  = f"{col_letter(C_EV_CUM)}{TABLE_DATA_START + n_data_rows + 1}"
+        npv_col_range = f"{col_letter(C_NPV)}{TABLE_DATA_START + 2}:{col_letter(C_NPV)}{TABLE_DATA_START + n_data_rows + 1}"
+
+        kpis = [
+            ("Total ICE TCO (fleet)",     f"={ice_cum_last}",                 currency_fmt),
+            ("Total EV TCO (fleet)",      f"={ev_cum_last}",                  currency_fmt),
+            ("Total Savings (fleet)",     f"={ice_cum_last}-{ev_cum_last}",   currency_fmt),
+            ("Total NPV Savings",         f"=SUM({npv_col_range})",           currency_fmt),
+        ]
+        for j, (lbl, formula, fmt) in enumerate(kpis):
+            r = SUMMARY_START + 1 + j
+            ws.write(r, 0, lbl, label_fmt)
+            ws.write_formula(r, 1, formula, fmt)
+
+    def _create_replacement_schedule_sheet(
+        self, workbook, vehicles, title_format, header_format, cell_format, number_format,
+        timeline_options: Optional[dict] = None,
+    ):
+        """Create Replacement Schedule sheet — Gantt-style table.
+
+        timeline_options: dict of {scenario_key: bool} indicating which scenario
+        year columns to append (from the Timelines to Include dialog).
+        """
+        from analysis.scenarios import get_scenario_year_assignments, PRESET_SCENARIOS
+
+        ws = workbook.add_worksheet("Replacement Schedule")
+        currency_fmt = workbook.add_format({'border': 1, 'num_format': '$#,##0'})
+        year_fmt     = workbook.add_format({'border': 1, 'align': 'center',
+                                            'bg_color': '#D6EAF8'})
+        override_fmt = workbook.add_format({'border': 1, 'align': 'center',
+                                            'bg_color': '#FFF3E0'})
+        yes_fmt      = workbook.add_format({'border': 1, 'align': 'center',
+                                            'bg_color': '#FFE0B2', 'bold': True})
+
+        ws.merge_range('A1:F1', "Vehicle Replacement Schedule", title_format)
+
+        # Compute scenario year assignments for selected timelines
+        active_scenarios: list = []
+        if timeline_options:
+            for key, selected in timeline_options.items():
+                if selected and key in PRESET_SCENARIOS:
+                    assignments = get_scenario_year_assignments(vehicles, key)
+                    active_scenarios.append(
+                        (PRESET_SCENARIOS[key].name, assignments)
+                    )
+
+        # Gather schedulable vehicles (keyed by vin for scenario lookup)
+        scheduled = []
+        for v in vehicles:
+            ev_year = v.custom_fields.get('Proposed EV Year', '')
+            if ev_year and ev_year not in ('N/A', 'Exempt', ''):
+                try:
+                    year_int = int(ev_year)
+                except (ValueError, TypeError):
+                    continue
+                make = v.vehicle_id.make or ''
+                model = v.vehicle_id.model or ''
+                dept = v.custom_fields.get('department', '')
+                ev_equiv = v.custom_fields.get('EV Equivalent', '')
+                ev_cost = float(v.custom_fields.get('_ev_purchase_price', 0) or 0)
+                is_override = v.custom_fields.get('EV Year Overridden', '') == 'Yes'
+                scheduled.append({
+                    'vehicle': f"{v.vehicle_id.year or ''} {make} {model}".strip(),
+                    'dept': dept,
+                    'ev_year': year_int,
+                    'ev_equiv': ev_equiv,
+                    'ev_cost': ev_cost,
+                    'vin': v.vin[:8] + '...' if v.vin else '',
+                    'vin_full': v.vin or '',
+                    'is_override': is_override,
+                })
+
+        if not scheduled:
+            ws.write(2, 0, "No vehicles scheduled for replacement")
+            return
+
+        scheduled.sort(key=lambda x: (x['ev_year'], x['vehicle']))
+
+        # Get year range
+        all_years = sorted(set(s['ev_year'] for s in scheduled))
+
+        # Base headers + override flag column
+        base_headers = ["Vehicle", "VIN", "Department", "EV Equivalent",
+                        "Est. Cost", "Overridden?"]
+        for col, h in enumerate(base_headers):
+            ws.write(2, col, h, header_format)
+        ws.set_column(0, 0, 25)
+        ws.set_column(1, 1, 12)
+        ws.set_column(2, 2, 18)
+        ws.set_column(3, 3, 22)
+        ws.set_column(4, 4, 14)
+        ws.set_column(5, 5, 12)
+
+        base_col_count = len(base_headers)
+
+        # Year columns (current/override timeline)
+        for i, yr in enumerate(all_years):
+            col = base_col_count + i
+            ws.write(2, col, str(yr), header_format)
+            ws.set_column(col, col, 8)
+
+        # Scenario year columns — one per selected scenario
+        scen_col_start = base_col_count + len(all_years)
+        for scen_idx, (scen_name, _assignments) in enumerate(active_scenarios):
+            col = scen_col_start + scen_idx
+            ws.write(2, col, f"{scen_name} Year", header_format)
+            ws.set_column(col, col, 14)
+
+        # Data rows
+        for row_idx, s in enumerate(scheduled):
+            row = 3 + row_idx
+            cell_fmt = override_fmt if s['is_override'] else cell_format
+
+            ws.write(row, 0, s['vehicle'], cell_fmt)
+            ws.write(row, 1, s['vin'], cell_fmt)
+            ws.write(row, 2, s['dept'], cell_fmt)
+            ws.write(row, 3, s['ev_equiv'], cell_fmt)
+            ws.write(row, 4, s['ev_cost'], currency_fmt)
+            ws.write(row, 5, "Yes" if s['is_override'] else "",
+                     yes_fmt if s['is_override'] else cell_format)
+
+            # Mark the replacement year (highlight override rows)
+            for i, yr in enumerate(all_years):
+                col = base_col_count + i
+                if yr == s['ev_year']:
+                    fmt = override_fmt if s['is_override'] else year_fmt
+                    ws.write(row, col, "X", fmt)
+                else:
+                    ws.write(row, col, "", cell_format)
+
+            # Scenario year values (one column per selected scenario)
+            for scen_idx, (_scen_name, assignments) in enumerate(active_scenarios):
+                col = scen_col_start + scen_idx
+                scen_year = assignments.get(s['vin_full'], "—")
+                ws.write(row, col, scen_year, cell_format)
+
+        # Summary row
+        summary_row = 3 + len(scheduled) + 1
+        ws.write(summary_row, 0, "Vehicles per year:", header_format)
+        for i, yr in enumerate(all_years):
+            col = base_col_count + i
+            count = sum(1 for s in scheduled if s['ev_year'] == yr)
+            ws.write(summary_row, col, count, header_format)
+
+        total_cost = sum(s['ev_cost'] for s in scheduled)
+        ws.write(summary_row + 1, 0, "Total estimated cost:", header_format)
+        ws.write(summary_row + 1, 4, total_cost, currency_fmt)
+
+    def _create_summary_dashboard_sheet(self, workbook, vehicles, analysis, charging, emissions, title_format, header_format, cell_format, number_format):
+        """Create Summary Dashboard sheet with KPI reference cells."""
+        ws = workbook.add_worksheet("Summary Dashboard")
+        kpi_title_fmt = workbook.add_format({
+            'bold': True, 'font_size': 11, 'bg_color': '#2C3E50',
+            'font_color': 'white', 'border': 1, 'align': 'center'
+        })
+        kpi_value_fmt = workbook.add_format({
+            'bold': True, 'font_size': 16, 'align': 'center',
+            'border': 1, 'num_format': '$#,##0'
+        })
+        kpi_text_fmt = workbook.add_format({
+            'bold': True, 'font_size': 16, 'align': 'center', 'border': 1
+        })
+
+        ws.merge_range('A1:F1', "Fleet Electrification — Executive Summary Dashboard", title_format)
+        ws.set_column(0, 5, 22)
+
+        # Row 3-4: Fleet KPIs
+        fleet_kpis = [
+            ("Fleet Size", str(len(vehicles)), False),
+            ("Avg MPG", f"{sum(v.fuel_economy.combined_mpg or 0 for v in vehicles) / max(1, sum(1 for v in vehicles if v.fuel_economy.combined_mpg)):,.1f}", False),
+        ]
+
+        if analysis:
+            fleet_kpis.extend([
+                ("Annual Savings", analysis.total_savings, True),
+                ("CO₂ Reduction", f"{analysis.co2_savings:,.1f} MT", False),
+                ("Payback Period", f"{analysis.payback_period:.1f} yr", False),
+            ])
+
+        if charging:
+            fleet_kpis.append(
+                ("Infrastructure Cost", charging.estimated_installation_cost, True)
+            )
+
+        for col, (title, value, is_currency) in enumerate(fleet_kpis):
+            ws.write(2, col, title, kpi_title_fmt)
+            if is_currency:
+                ws.write(3, col, value, kpi_value_fmt)
+            else:
+                ws.write(3, col, str(value), kpi_text_fmt)
+
+        # Row 6+: Breakdown tables
+        row = 6
+        if emissions and emissions.by_department:
+            ws.write(row, 0, "Emissions by Department", header_format)
+            ws.write(row, 1, "MT CO2e", header_format)
+            row += 1
+            for dept, em in sorted(emissions.by_department.items(), key=lambda x: x[1], reverse=True):
+                ws.write(row, 0, dept, cell_format)
+                ws.write(row, 1, em, number_format)
+                row += 1
+            row += 1
+
+        # ACF breakdown
+        acf_counts = {}
+        for v in vehicles:
+            code = v.custom_fields.get('ACF Category', '')
+            if code:
+                acf_counts[code] = acf_counts.get(code, 0) + 1
+
+        if acf_counts:
+            ws.write(row, 0, "ACF Classification", header_format)
+            ws.write(row, 1, "Count", header_format)
+            row += 1
+            for cat, count in sorted(acf_counts.items()):
+                ws.write(row, 0, cat, cell_format)
+                ws.write(row, 1, count, cell_format)
+                row += 1
+            row += 1
+
+        # EV year distribution
+        year_counts = {}
+        for v in vehicles:
+            yr = v.custom_fields.get('Proposed EV Year', '')
+            if yr and yr not in ('N/A', 'Exempt'):
+                year_counts[yr] = year_counts.get(yr, 0) + 1
+
+        if year_counts:
+            ws.write(row, 0, "Replacement Year", header_format)
+            ws.write(row, 1, "Vehicles", header_format)
+            row += 1
+            for yr, count in sorted(year_counts.items()):
+                ws.write(row, 0, yr, cell_format)
+                ws.write(row, 1, count, cell_format)
+                row += 1
+
+
+
 ###############################################################################
-# PDF Export
+# PDF Export — REMOVED (Phase 5 Fix 40 / Phase 13 Fix G)
 ###############################################################################
 
 class PdfReportGenerator(ReportGenerator):
-    """Generate PDF reports from fleet data with charts and analysis."""
-    
-    def generate(self, fleet: Union[Fleet, List[FleetVehicle]], 
-               analysis: Optional[ElectrificationAnalysis] = None,
-               charging: Optional[ChargingAnalysis] = None,
-               emissions: Optional[EmissionsInventory] = None,
-               include_charts: bool = True,
-               include_vehicle_table: bool = True) -> bool:
-        """
-        Generate a PDF report with data, charts, and analysis.
-        
-        Args:
-            fleet: Fleet object or list of vehicles
-            analysis: Optional electrification analysis
-            charging: Optional charging analysis
-            emissions: Optional emissions inventory
-            include_charts: Whether to include charts
-            include_vehicle_table: Whether to include the vehicle data table
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        if not PDF_AVAILABLE:
-            logger.error("PDF export is not available (reportlab not installed)")
-            return False
-        
-        try:
-            # Extract vehicles from fleet if needed
-            vehicles = fleet.vehicles if isinstance(fleet, Fleet) else fleet
-            
-            if not vehicles:
-                logger.warning("No vehicles to export")
-                return False
-            
-            # Create PDF document
-            doc = SimpleDocTemplate(
-                self.output_path,
-                pagesize=letter,
-                rightMargin=72,
-                leftMargin=72,
-                topMargin=72,
-                bottomMargin=72
-            )
-            
-            # Get styles
-            styles = getSampleStyleSheet()
-            title_style = styles['Title']
-            heading1_style = styles['Heading1']
-            heading2_style = styles['Heading2']
-            normal_style = styles['Normal']
-            
-            # Create custom paragraph styles
-            subtitle_style = ParagraphStyle(
-                'Subtitle',
-                parent=styles['Heading2'],
-                fontSize=12,
-                spaceAfter=12
-            )
-            
-            table_header_style = ParagraphStyle(
-                'TableHeader',
-                parent=styles['Normal'],
-                fontSize=9,
-                textColor=colors.white,
-                alignment=1  # Center
-            )
-            
-            table_cell_style = ParagraphStyle(
-                'TableCell',
-                parent=styles['Normal'],
-                fontSize=8
-            )
-            
-            # Create story (list of elements to add to the PDF)
-            story = []
-            
-            # Add title
-            fleet_name = fleet.name if isinstance(fleet, Fleet) else "Fleet Analysis"
-            report_date = datetime.datetime.now().strftime("%Y-%m-%d")
-            
-            story.append(Paragraph(f"{fleet_name}", title_style))
-            story.append(Paragraph(f"Fleet Electrification Analysis Report", subtitle_style))
-            story.append(Paragraph(f"Generated on {report_date}", normal_style))
-            story.append(Spacer(1, 12))
-            
-            # Add fleet summary
-            story.append(Paragraph("Fleet Summary", heading1_style))
-            story.append(Spacer(1, 6))
-            
-            # Basic statistics
-            summary_data = [
-                ["Total Vehicles:", f"{len(vehicles)}"],
-                ["Average MPG:", f"{self._calculate_avg_mpg(vehicles):.1f}"],
-                ["Average CO2 Emissions:", f"{self._calculate_avg_co2(vehicles):.1f} g/mile"],
-                ["Average Annual Mileage:", f"{self._calculate_avg_mileage(vehicles):.0f} miles"]
-            ]
-            
-            # Create table for summary stats
-            summary_table = Table(summary_data, colWidths=[2*inch, 1.5*inch])
-            summary_table.setStyle(TableStyle([
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                ('BACKGROUND', (0, 0), (0, -1), colors.lightgrey),
-                ('ALIGN', (1, 0), (1, -1), 'CENTER'),
-            ]))
-            
-            story.append(summary_table)
-            story.append(Spacer(1, 12))
-            
-            # Add charts if requested
-            if include_charts and len(vehicles) > 0:
-                story.append(Paragraph("Fleet Composition", heading2_style))
-                story.append(Spacer(1, 6))
-                
-                # Create and add make frequency chart
-                if self._add_chart_to_story(story, "Make Frequency", vehicles):
-                    story.append(Spacer(1, 12))
-                
-                # Create and add body class distribution chart
-                if self._add_chart_to_story(story, "Body Class Distribution", vehicles):
-                    story.append(Spacer(1, 12))
-                
-                # Create and add fuel type distribution chart
-                if self._add_chart_to_story(story, "Fuel Type Distribution", vehicles):
-                    story.append(Spacer(1, 12))
-                
-                story.append(Paragraph("Fleet Performance", heading2_style))
-                story.append(Spacer(1, 6))
-                
-                # Create and add MPG distribution chart
-                if self._add_chart_to_story(story, "MPG Distribution", vehicles):
-                    story.append(Spacer(1, 12))
-                
-                # Create and add CO2 distribution chart
-                if self._add_chart_to_story(story, "CO2 Emissions Distribution", vehicles):
-                    story.append(Spacer(1, 12))
-                
-                # Create and add CO2 vs MPG chart
-                if self._add_chart_to_story(story, "CO2 vs MPG Correlation", vehicles):
-                    story.append(Spacer(1, 12))
-            
-            # Add electrification analysis if available
-            if analysis:
-                story.append(Paragraph("Electrification Analysis", heading1_style))
-                story.append(Spacer(1, 6))
-                
-                # Add analysis parameters
-                story.append(Paragraph("Analysis Parameters:", heading2_style))
-                
-                params_data = [
-                    ["Gas Price:", f"${analysis.gas_price:.2f}/gal"],
-                    ["Electricity Price:", f"${analysis.electricity_price:.2f}/kWh"],
-                    ["EV Efficiency:", f"{analysis.ev_efficiency:.2f} kWh/mile"],
-                    ["Analysis Period:", f"{analysis.analysis_period} years"],
-                    ["Discount Rate:", f"{analysis.discount_rate:.1f}%"]
-                ]
-                
-                params_table = Table(params_data, colWidths=[2*inch, 1.5*inch])
-                params_table.setStyle(TableStyle([
-                    ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                    ('BACKGROUND', (0, 0), (0, -1), colors.lightgrey),
-                    ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-                ]))
-                
-                story.append(params_table)
-                story.append(Spacer(1, 12))
-                
-                # Add analysis results
-                story.append(Paragraph("Analysis Results:", heading2_style))
-                
-                results_data = [
-                    ["Total CO2 Savings:", f"{analysis.co2_savings:.1f} tons"],
-                    ["Fuel Cost Savings:", f"${analysis.fuel_cost_savings:,.2f}"],
-                    ["Maintenance Savings:", f"${analysis.maintenance_savings:,.2f}"],
-                    ["Total Savings:", f"${analysis.total_savings:,.2f}"],
-                    ["Payback Period:", f"{analysis.payback_period:.1f} years"]
-                ]
-                
-                results_table = Table(results_data, colWidths=[2*inch, 1.5*inch])
-                results_table.setStyle(TableStyle([
-                    ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                    ('BACKGROUND', (0, 0), (0, -1), colors.lightgrey),
-                    ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-                ]))
-                
-                story.append(results_table)
-                story.append(Spacer(1, 12))
-                
-                # Add electrification potential chart
-                if include_charts:
-                    if self._add_chart_to_story(story, "Electrification Potential", analysis):
-                        story.append(Spacer(1, 12))
-            
-            # Add charging analysis if available
-            if charging:
-                story.append(Paragraph("Charging Infrastructure", heading1_style))
-                story.append(Spacer(1, 6))
-                
-                # Add infrastructure requirements
-                infra_data = [
-                    ["Level 2 Chargers:", f"{charging.level2_chargers_needed}"],
-                    ["DC Fast Chargers:", f"{charging.dcfc_chargers_needed}"],
-                    ["Maximum Power Required:", f"{charging.max_power_required:.1f} kW"],
-                    ["Estimated Cost:", f"${charging.estimated_installation_cost:,.2f}"]
-                ]
-                
-                infra_table = Table(infra_data, colWidths=[2*inch, 1.5*inch])
-                infra_table.setStyle(TableStyle([
-                    ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                    ('BACKGROUND', (0, 0), (0, -1), colors.lightgrey),
-                    ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-                ]))
-                
-                story.append(infra_table)
-                story.append(Spacer(1, 12))
-                
-                # Add charging infrastructure chart
-                if include_charts:
-                    if self._add_chart_to_story(story, "Charging Infrastructure", charging):
-                        story.append(Spacer(1, 12))
-            
-            # Add vehicle data table if requested
-            if include_vehicle_table:
-                story.append(Paragraph("Vehicle Data", heading1_style))
-                story.append(Spacer(1, 6))
-                
-                # Get selected fields
-                fields = ["VIN", "Year", "Make", "Model", "MPG Combined", "CO2 emissions", "Annual Mileage"]
-                headers = [COLUMN_NAME_MAP.get(field, field) for field in fields]
-                
-                # Create table data
-                table_data = [headers]  # First row is headers
-                
-                for vehicle in vehicles:
-                    row_dict = vehicle.to_row_dict()
-                    table_data.append([row_dict.get(field, "") for field in fields])
-                
-                # Create table
-                vehicle_table = Table(table_data, repeatRows=1)
-                
-                # Style the table
-                style = TableStyle([
-                    ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue),
-                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-                    ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
-                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                    ('FONTSIZE', (0, 0), (-1, 0), 8),
-                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-                    ('GRID', (0, 0), (-1, -1), 0.25, colors.black),
-                    ('FONTSIZE', (0, 1), (-1, -1), 7),
-                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-                    ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey])
-                ])
-                
-                vehicle_table.setStyle(style)
-                
-                # Add table to story
-                story.append(vehicle_table)
-            
-            # Build the PDF
-            doc.build(story)
-            
-            logger.info(f"PDF report generated successfully: {self.output_path}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error generating PDF report: {e}")
-            return False
-    
-    def _calculate_avg_mpg(self, vehicles):
-        """Calculate average MPG for fleet."""
-        mpg_values = [v.fuel_economy.combined_mpg for v in vehicles 
-                     if v.fuel_economy.combined_mpg and v.fuel_economy.combined_mpg > 0]
-        
-        if not mpg_values:
-            return 0.0
-        
-        return sum(mpg_values) / len(mpg_values)
-    
-    def _calculate_avg_co2(self, vehicles):
-        """Calculate average CO2 emissions for fleet."""
-        co2_values = [v.fuel_economy.co2_primary for v in vehicles 
-                     if v.fuel_economy.co2_primary and v.fuel_economy.co2_primary > 0]
-        
-        if not co2_values:
-            return 0.0
-        
-        return sum(co2_values) / len(co2_values)
-    
-    def _calculate_avg_mileage(self, vehicles):
-        """Calculate average annual mileage for fleet."""
-        mileage_values = [v.annual_mileage for v in vehicles 
-                         if v.annual_mileage and v.annual_mileage > 0]
-        
-        if not mileage_values:
-            return 0.0
-        
-        return sum(mileage_values) / len(mileage_values)
-    
-    def _add_chart_to_story(self, story, chart_type, data):
-        """Add a chart to the PDF story."""
-        try:
-            # Create the chart using matplotlib
-            figure = ChartFactory.create_chart(chart_type, data)
-            
-            # Save chart to a BytesIO object
-            buf = BytesIO()
-            figure.savefig(buf, format='png', dpi=150, bbox_inches='tight')
-            buf.seek(0)
-            
-            # Add chart to story
-            img = Image(buf, width=6*inch, height=4*inch)
-            story.append(img)
-            
-            plt.close(figure)
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error adding chart to PDF: {e}")
-            return False
+    """PDF export removed in Phase 5 (Fix 40). Stub so factory does not raise
+    NameError if called with a .pdf path; always returns False."""
+
+    def generate(self, fleet, **kwargs) -> bool:  # type: ignore[override]
+        logger.error("PDF export is not supported. Only CSV and Excel exports are available.")
+        return False
 
 
 ###############################################################################
@@ -1174,11 +1467,6 @@ class ReportGeneratorFactory:
                 return None
             return ExcelReportGenerator(output_path)
         
-        elif ext == '.pdf':
-            if not PDF_AVAILABLE:
-                logger.error("PDF export is not available (reportlab not installed)")
-                return None
-            return PdfReportGenerator(output_path)
         
         elif ext == '.json':
             return JsonReportGenerator(output_path)
@@ -1296,10 +1584,6 @@ class ExportCoordinator:
                 results[format_name] = None
                 continue
                 
-            if format_ext == '.pdf' and not PDF_AVAILABLE:
-                results[format_name] = None
-                continue
-            
             # Export to the format
             if base_filename:
                 custom_name = f"{base_filename}{format_ext}"
