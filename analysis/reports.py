@@ -255,9 +255,10 @@ class ExcelReportGenerator(ReportGenerator):
             # Create Vehicle Data sheet
             self._create_vehicle_data_sheet(workbook, vehicles, fields, title_format, header_format, cell_format, number_format)
             
-            # Create Summary sheet
-            self._create_summary_sheet(workbook, vehicles, title_format, header_format)
-            
+            # Create Fleet Overview sheet (merged Summary + Summary Dashboard)
+            self._create_fleet_overview_sheet(workbook, vehicles, analysis, charging, emissions,
+                                              title_format, header_format, cell_format, number_format)
+
             # Create Electrification Analysis sheet if available
             if analysis:
                 self._create_electrification_sheet(workbook, analysis, title_format, header_format, cell_format, number_format)
@@ -279,8 +280,6 @@ class ExcelReportGenerator(ReportGenerator):
                 title_format, header_format, cell_format, number_format,
                 timeline_options=timeline_options,
             )
-
-            self._create_summary_dashboard_sheet(workbook, vehicles, analysis, charging, emissions, title_format, header_format, cell_format, number_format)
 
             # Close workbook to save changes
             workbook.close()
@@ -451,53 +450,180 @@ class ExcelReportGenerator(ReportGenerator):
                        note_fmt)
 
     def _create_vehicle_data_sheet(self, workbook, vehicles, fields, title_format, header_format, cell_format, number_format):
-        """Create the Vehicle Data sheet with all vehicle information."""
+        """Create the Vehicle Data sheet with all vehicle information.
+
+        Data-quality columns (MPG Source, MPG Estimated, Match Confidence, Data
+        Quality, Processing Status) come straight from to_row_dict(); this method
+        highlights estimated/low-confidence/failed cells so analysts and clients
+        can see at a glance which numbers are soft.
+        """
         # Create worksheet
         worksheet = workbook.add_worksheet("Vehicle Data")
-        
+
+        # Quality-flag formats
+        estimate_fmt = workbook.add_format({'border': 1, 'bg_color': '#FFF3E0'})   # amber — estimate
+        warn_fmt     = workbook.add_format({'border': 1, 'bg_color': '#FDE0DC',
+                                            'font_color': '#B71C1C'})              # red — low quality / failed
+
+        def _pct(value):
+            """Parse '85%' / '85' / 85 -> 85.0; None on failure."""
+            try:
+                return float(str(value).replace('%', '').strip())
+            except (ValueError, TypeError):
+                return None
+
         # Create user-friendly headers
         headers = [COLUMN_NAME_MAP.get(field, field) for field in fields]
-        
+
         # Set column widths
         for i, field in enumerate(fields):
             worksheet.set_column(i, i, 15)  # Default width
-            
+
             # Wider columns for specific fields
             if field in ["VIN", "Make", "Model", "BodyClass"]:
                 worksheet.set_column(i, i, 20)
             elif field in ["Assumed Vehicle (Text)"]:
                 worksheet.set_column(i, i, 30)
-            
+
         # Add title
         worksheet.merge_range('A1:E1', "Fleet Vehicle Data", title_format)
-        
+
         # Add headers
         for col, header in enumerate(headers):
             worksheet.write(2, col, header, header_format)
-        
+
         # Add data
         for row, vehicle in enumerate(vehicles):
             data = vehicle.to_row_dict()
-            
+
             for col, field in enumerate(fields):
                 value = data.get(field, "")
-                
+
+                # Per-cell quality highlighting
+                quality_fmt = None
+                if field == "MPG Estimated" and str(value).strip().lower() == "yes":
+                    quality_fmt = estimate_fmt
+                elif field == "MPG Source" and getattr(vehicle.fuel_economy, "mpg_is_estimate", False):
+                    quality_fmt = estimate_fmt
+                elif field == "Processing Status" and str(value).strip().lower() == "failed":
+                    quality_fmt = warn_fmt
+                elif field == "Data Quality":
+                    p = _pct(value)
+                    if p is not None and p < 60:
+                        quality_fmt = warn_fmt
+                elif field == "Match Confidence":
+                    p = _pct(value)
+                    if p is not None and p < 60:
+                        quality_fmt = estimate_fmt
+
                 # Format numbers appropriately
                 if field in ["MPG City", "MPG Highway", "MPG Combined", "CO2 emissions", "co2A"]:
                     try:
                         value = float(value)
-                        worksheet.write(row + 3, col, value, number_format)
+                        worksheet.write(row + 3, col, value, quality_fmt or number_format)
                     except (ValueError, TypeError):
-                        worksheet.write(row + 3, col, value, cell_format)
+                        worksheet.write(row + 3, col, value, quality_fmt or cell_format)
                 else:
-                    worksheet.write(row + 3, col, value, cell_format)
-        
+                    worksheet.write(row + 3, col, value, quality_fmt or cell_format)
+
         # Freeze header row
         worksheet.freeze_panes(3, 0)
-        
+
         # Auto-filter
         worksheet.autofilter(2, 0, 2 + len(vehicles), len(headers) - 1)
     
+    def _create_fleet_overview_sheet(self, workbook, vehicles, analysis, charging, emissions,
+                                     title_format, header_format, cell_format, number_format):
+        """Fleet Overview — merges the old Summary + Summary Dashboard into one sheet.
+
+        KPI band on top, then composition tables (ACF / fuel / make) each paired
+        with a native Excel chart. Department-emissions and EV-year distributions
+        are intentionally NOT duplicated here — they live on their canonical
+        Emissions & Scenarios and Replacement & Capital Plan sheets.
+        """
+        SHEET = "Fleet Overview"
+        ws = workbook.add_worksheet(SHEET)
+        ws.set_column('A:A', 26)
+        ws.set_column('B:C', 14)
+        ws.hide_gridlines(2)
+
+        kpi_label_fmt = workbook.add_format({
+            'bold': True, 'bg_color': '#EAF2FB', 'border': 1, 'align': 'center', 'font_size': 9})
+        kpi_value_fmt = workbook.add_format({
+            'bold': True, 'font_size': 16, 'align': 'center', 'border': 1})
+        kpi_money_fmt = workbook.add_format({
+            'bold': True, 'font_size': 16, 'align': 'center', 'border': 1, 'num_format': '$#,##0'})
+        count_fmt = workbook.add_format({'border': 1, 'align': 'right'})
+
+        ws.merge_range('A1:H1', "Fleet Electrification — Overview", title_format)
+
+        # ── KPI band ─────────────────────────────────────────────────────────────
+        mpg_vals = [v.fuel_economy.combined_mpg for v in vehicles
+                    if getattr(v.fuel_economy, 'combined_mpg', 0)]
+        avg_mpg = sum(mpg_vals) / len(mpg_vals) if mpg_vals else 0.0
+        coverage = (len(mpg_vals) / len(vehicles) * 100) if vehicles else 0.0
+
+        def _acf(v):
+            return (v.custom_fields.get('_acf_code')
+                    or v.custom_fields.get('ACF Category', '') or '').strip()
+        acf_b = sum(1 for v in vehicles if _acf(v) == 'B')
+
+        kpis = [
+            ("Fleet Size", len(vehicles), kpi_value_fmt),
+            ("Avg MPG", f"{avg_mpg:.1f}", kpi_value_fmt),
+            ("MPG Coverage", f"{coverage:.0f}%", kpi_value_fmt),
+            ("ACF-B Count", acf_b, kpi_value_fmt),
+        ]
+        if analysis is not None:
+            kpis.append(("Total Savings", getattr(analysis, 'total_savings', 0) or 0, kpi_money_fmt))
+            kpis.append(("Payback (yr)", f"{getattr(analysis, 'payback_period', 0) or 0:.1f}", kpi_value_fmt))
+        for col, (label, value, vfmt) in enumerate(kpis):
+            ws.write(2, col, label, kpi_label_fmt)
+            ws.write(3, col, value, vfmt)
+
+        # ── Composition tables + native charts ───────────────────────────────────
+        def _dist(getter):
+            d = {}
+            for v in vehicles:
+                k = getter(v)
+                if k:
+                    d[k] = d.get(k, 0) + 1
+            return sorted(d.items(), key=lambda x: x[1], reverse=True)
+
+        acf_dist  = _dist(_acf)
+        fuel_dist = _dist(lambda v: v.vehicle_id.fuel_type)
+        make_dist = _dist(lambda v: v.vehicle_id.make)[:10]
+
+        def _write_table(start_row, title, rows, chart_type):
+            """Write a 2-col table (category, count) and return chart anchored to the right."""
+            ws.write(start_row, 0, title, header_format)
+            ws.write(start_row, 1, "Count", header_format)
+            r = start_row + 1
+            for name, count in rows:
+                ws.write(r, 0, name, cell_format)
+                ws.write(r, 1, count, count_fmt)
+                r += 1
+            last = r - 1
+            if rows:
+                chart = workbook.add_chart({'type': chart_type})
+                chart.add_series({
+                    'name': title,
+                    'categories': [SHEET, start_row + 1, 0, last, 0],
+                    'values':     [SHEET, start_row + 1, 1, last, 1],
+                    'data_labels': {'value': True} if chart_type == 'pie' else {},
+                })
+                chart.set_title({'name': title})
+                chart.set_size({'width': 360, 'height': 220})
+                if chart_type != 'pie':
+                    chart.set_legend({'none': True})
+                ws.insert_chart(start_row, 3, chart)
+            return r + 1  # next free row (one blank separator)
+
+        row = 6
+        row = _write_table(row, "ACF Classification", acf_dist, 'pie')
+        row = _write_table(row + 11, "Fuel Type", fuel_dist, 'pie')
+        row = _write_table(row + 11, "Top Makes", make_dist, 'column')
+
     def _create_summary_sheet(self, workbook, vehicles, title_format, header_format):
         """Create a summary sheet with fleet statistics and charts."""
         # Create worksheet
