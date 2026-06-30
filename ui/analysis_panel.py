@@ -13,6 +13,7 @@ import datetime
 import logging
 import threading
 import subprocess
+import warnings
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from typing import Dict, List, Any, Optional, Callable, Tuple
@@ -23,6 +24,7 @@ import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.ticker import MaxNLocator
 
 try:
     from PIL import Image as _PILImage, ImageTk as _ImageTk
@@ -86,11 +88,31 @@ ACF_COLORS = {
 
 # Plain-English labels for ACF category codes (shared with timeline_panel)
 ACF_LABELS = {
-    "ZEV": "Already ZEV",
-    "A":   "Light-Duty (Exempt)",
-    "B":   "Mandate-Subject",
-    "C":   "Body-Type Exempt",
+    "ZEV": "Already Zero-Emission",
+    "A":   "Light Duty Vehicles (Excluded from ACF)",
+    "B":   "Medium or Heavy-Duty Vehicles (Subject to ACF)",
+    "C":   "Body-Type Exempt Vehicles (Excluded from ACF)",
+    "D":   "Emergency Vehicles (Excluded from ACF)",
+}
+
+# Canonical display labels as stored in custom_fields["ACF Category"] by acf_compliance.py.
+# Used to keep ACF Category consistent after manual overrides.
+ACF_CODE_TO_LABEL: dict = {
+    "ZEV": "Zero-Emission Vehicle",
+    "A":   "Exempt — Light-Duty",
+    "B":   "Subject to ACF",
+    "C":   "Exempt — Body Type",
     "D":   "Emergency Vehicle",
+}
+ACF_LABEL_TO_CODE: dict = {v: k for k, v in ACF_CODE_TO_LABEL.items()}
+
+# Short versions for tight UI spaces (dropdowns, Gantt axis, etc.)
+ACF_LABELS_SHORT = {
+    "ZEV": "Already Zero-Emission",
+    "A":   "Light Duty (Excl. ACF)",
+    "B":   "Medium/Heavy-Duty (Subject to ACF)",
+    "C":   "Body-Type Exempt (Excl. ACF)",
+    "D":   "Emergency Vehicle (Excl. ACF)",
 }
 
 
@@ -144,7 +166,7 @@ def _show_acf_ev_year_dialog(parent, old_acf: str, new_acf: str,
 
     ttk.Label(
         msg_frame,
-        text=f"  From:  {old_acf} — {old_label}\n  To:      {new_acf} — {new_label}",
+        text=f"  From:  {old_label}\n  To:      {new_label}",
         justify="left",
     ).pack(anchor="w", pady=(4, 8))
 
@@ -343,7 +365,7 @@ def _gantt_grouped(ax, vehicles: list, years: list) -> None:
 
     cat_pos = {c: i for i, c in enumerate(reversed(cats))}
     ax.set_yticks(list(cat_pos.values()))
-    ax.set_yticklabels([ACF_LABELS.get(c, c) for c in reversed(cats)], fontsize=8)
+    ax.set_yticklabels([ACF_LABELS_SHORT.get(c, c) for c in reversed(cats)], fontsize=8)
     ax.set_ylim(-0.7, len(cats) - 0.3)
 
     for cat in cats:
@@ -592,6 +614,10 @@ class AnalysisPanel(ttk.Frame):
         self._scenario_cost_fig    = None
         self._scenario_cost_canvas = None
 
+        # ── ZEV Purchase Schedule chart ───────────────────────────────────────
+        self._purchase_fig    = None
+        self._purchase_canvas = None
+
         # ── Stale analysis tracking ───────────────────────────────────────────
         self._analysis_is_stale = False
 
@@ -618,7 +644,8 @@ class AnalysisPanel(ttk.Frame):
           3. Fleet Snapshot KPIs
           4. Scenario Comparison (primary analytical view)
           5. Chart Gallery (replaces old Chart Browser)
-          6. Electrification Timeline Gantt
+          6. ZEV Purchase Schedule (stacked bar, always visible after analysis)
+          7. Electrification Timeline Gantt
           7. TCO Summary
           8. Top-5 Priority / ACF Donut (collapsible, starts collapsed)
           9. Export bar
@@ -641,6 +668,9 @@ class AnalysisPanel(ttk.Frame):
         ttk.Separator(dash, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=Spacing.MD)
 
         self._create_chart_gallery_section(dash)
+        ttk.Separator(dash, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=Spacing.MD)
+
+        self._create_purchase_schedule_section(dash)
         ttk.Separator(dash, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=Spacing.MD)
 
         self._create_gantt_section(dash)
@@ -847,7 +877,7 @@ class AnalysisPanel(ttk.Frame):
             rf.pack(anchor="w")
             tk.Label(rf, text="●", foreground=ACF_COLORS.get(cat, "#888"),
                      font=(Fonts.FAMILY_SANS, Fonts.SIZE_SMALL)).pack(side=tk.LEFT)
-            lbl = ttk.Label(rf, text=f"Category {cat}: —",
+            lbl = ttk.Label(rf, text=f"{ACF_LABELS_SHORT.get(cat, cat)}: —",
                             font=(Fonts.FAMILY_SANS, Fonts.SIZE_SMALL))
             lbl.pack(side=tk.LEFT, padx=(2, 0))
             self._acf_count_labels[cat] = lbl
@@ -867,14 +897,14 @@ class AnalysisPanel(ttk.Frame):
         cb_row.pack(fill=tk.X, padx=Spacing.SM, pady=(Spacing.XS, 0))
 
         scope_labels = {
-            "minimum_compliance":    "Minimum Compliance (Cat B only)",
-            "all_except_emergency":  "All Excl. Emergency (A+B+C)",
-            "whole_fleet":           "Whole Fleet (A+B+C+D)",
+            "minimum_compliance":    "Minimum Compliance (M/HD Subject to ACF only)",
+            "all_except_emergency":  "All Excl. Emergency (Light Duty + M/HD + Body-Type Exempt)",
+            "whole_fleet":           "Whole Fleet (All categories)",
         }
         scope_tips = {
-            "minimum_compliance":   "Only ACF mandate-subject vehicles (medium & heavy duty, Cat B).\nShows the bare minimum required by CARB.",
-            "all_except_emergency": "All vehicles except emergency (Cat A light-duty, Cat B mandate-subject, Cat C body-type exempt).\nTypical planning scope for most clients.",
-            "whole_fleet":          "Every vehicle including emergency vehicles (Cat A+B+C+D).\nShows the full fleet electrification cost and CO\u2082 benefit.",
+            "minimum_compliance":   "Only medium and heavy-duty vehicles subject to ACF mandate.\nShows the bare minimum required by CARB.",
+            "all_except_emergency": "All vehicles except emergency vehicles \u2014 includes light duty, M/HD subject, and body-type exempt.\nTypical planning scope for most clients.",
+            "whole_fleet":          "Every vehicle including emergency vehicles.\nShows the full fleet electrification cost and CO\u2082 benefit.",
         }
         for key, label in scope_labels.items():
             cb = ttk.Checkbutton(
@@ -1006,6 +1036,116 @@ class AnalysisPanel(ttk.Frame):
             self._tco_kpi_labels[key] = val_lbl
 
         self.kpi_labels.update(self._tco_kpi_labels)
+
+    # ── ZEV Purchase Schedule (standalone stacked bar, always visible) ─────────
+
+    def _create_purchase_schedule_section(self, parent):
+        """Stacked bar chart: vehicles-per-year by ACF designation (current plan)."""
+        section = ttk.LabelFrame(parent, text="ZEV Purchase Schedule — Vehicles by Year")
+        section.pack(fill=tk.BOTH, padx=Spacing.SM, pady=(0, Spacing.SM))
+
+        self._purchase_fig = Figure(figsize=(9, 3.4), dpi=80)
+        self._purchase_fig.patch.set_facecolor(Colors.SURFACE)
+        canvas = FigureCanvasTkAgg(self._purchase_fig, master=section)
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True,
+                                    padx=Spacing.SM, pady=Spacing.SM)
+        self._purchase_canvas = canvas
+
+        ax = self._purchase_fig.add_subplot(111)
+        ax.text(0.5, 0.5, "Run Full Analysis to populate.",
+                ha="center", va="center", fontsize=9, color=Colors.TEXT_TERTIARY)
+        ax.axis("off")
+        self._purchase_canvas.draw()
+
+    def _update_purchase_schedule_chart(self):
+        """Redraw the ZEV Purchase Schedule stacked bar from fleet data."""
+        if self._purchase_fig is None or self._purchase_canvas is None:
+            return
+
+        self._purchase_fig.clear()
+        ax = self._purchase_fig.add_subplot(111)
+
+        if not self.fleet or not self.fleet.vehicles:
+            ax.text(0.5, 0.5, "No fleet data available.",
+                    ha="center", va="center", fontsize=9, color=Colors.TEXT_TERTIARY)
+            ax.axis("off")
+            self._purchase_canvas.draw()
+            return
+
+        # Series definition: code → (display label, color)
+        SERIES = [
+            ("A", "Light Duty Vehicles (Excluded from ACF)",          ACF_COLORS["A"]),
+            ("B", "Medium or Heavy-Duty Vehicles (Subject to ACF)",   ACF_COLORS["B"]),
+            ("C", "Body-Type Exempt Vehicles (Excluded from ACF)",    ACF_COLORS["C"]),
+            ("D", "Emergency Vehicles (Excluded from ACF)",           ACF_COLORS["D"]),
+        ]
+
+        import datetime as _dt
+        current_year = _dt.datetime.now().year
+        start_year = max(current_year, 2026)
+        end_year = 2045
+
+        # Build year × code matrix
+        year_counts: Dict[int, Dict[str, int]] = {
+            yr: {code: 0 for code, _, _ in SERIES}
+            for yr in range(start_year, end_year + 1)
+        }
+        valid_codes = {code for code, _, _ in SERIES}
+        has_any = False
+        for v in self.fleet.vehicles:
+            code = v.custom_fields.get("_acf_code", "")
+            if code not in valid_codes:
+                continue
+            yr_str = v.custom_fields.get("Proposed EV Year", "")
+            try:
+                yr = int(yr_str)
+                if start_year <= yr <= end_year:
+                    year_counts[yr][code] += 1
+                    has_any = True
+            except (ValueError, TypeError):
+                pass
+
+        if not has_any:
+            ax.text(0.5, 0.5,
+                    "No electrification years assigned.\nRun Full Analysis first.",
+                    ha="center", va="center", fontsize=9, color=Colors.TEXT_TERTIARY)
+            ax.axis("off")
+            self._purchase_canvas.draw()
+            return
+
+        years = list(range(start_year, end_year + 1))
+        x = list(range(len(years)))
+        bottoms = [0] * len(years)
+
+        for code, label, color in SERIES:
+            vals = [year_counts[yr][code] for yr in years]
+            if sum(vals) == 0:
+                continue
+            bars = ax.bar(x, vals, bottom=bottoms, color=color, label=label,
+                          edgecolor="white", linewidth=0.5)
+            # Show count on bars > 0
+            for bar, val, bot in zip(bars, vals, bottoms):
+                if val > 0:
+                    ax.text(bar.get_x() + bar.get_width() / 2,
+                            bot + val / 2, str(val),
+                            ha="center", va="center", fontsize=6.5,
+                            color="white", fontweight="bold")
+            bottoms = [b + v for b, v in zip(bottoms, vals)]
+
+        ax.set_xticks(x)
+        ax.set_xticklabels([str(y) for y in years], fontsize=7, rotation=45, ha="right")
+        ax.set_ylabel("Vehicles for Replacement", fontsize=8)
+        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.set_xlim(-0.6, len(years) - 0.4)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.tick_params(axis="y", labelsize=7)
+        ax.legend(fontsize=7, loc="upper left", frameon=True,
+                  facecolor=Colors.SURFACE, edgecolor="#CCCCCC")
+        self._purchase_fig.patch.set_facecolor(Colors.SURFACE)
+        ax.set_facecolor(Colors.SURFACE)
+        self._purchase_fig.tight_layout(pad=0.5)
+        self._purchase_canvas.draw()
 
     # ── Electrification Gantt (collapsible, starts collapsed) ─────────────────
 
@@ -1163,6 +1303,8 @@ class AnalysisPanel(ttk.Frame):
         self._gallery_pptx_vars: Dict[str, tk.BooleanVar] = {}
         self._gallery_thumb_frames: Dict[str, tk.Frame] = {}
         self._gallery_thumb_rendered = False
+        self._thumb_render_queue: list = []
+        self._thumb_render_vars: dict = {}
 
         # Populate thumbnail placeholders immediately (text cards, no renders yet)
         self._build_thumbnail_placeholders()
@@ -1220,67 +1362,85 @@ class AnalysisPanel(ttk.Frame):
         if not self.fleet:
             return
         self._gallery_thumb_rendered = True
-        # Render each chart in the background to avoid freezing the UI
-        threading.Thread(target=self._render_all_thumbnails, daemon=True).start()
+        # Snapshot Tkinter variable values now (main thread) so render loop doesn't touch them
+        self._thumb_render_vars = {
+            "gas_price": self.gas_price_var.get(),
+            "electricity_price": self.electricity_price_var.get(),
+            "ev_efficiency": self.ev_efficiency_var.get(),
+            "color_scheme": self.color_scheme_var.get(),
+        }
+        self._thumb_render_queue = list(CHART_TYPES)
+        self.after(0, self._render_next_thumbnail)
 
-    def _render_all_thumbnails(self):
-        """Background thread: render each chart type as a small thumbnail."""
-        if not _PIL_AVAILABLE:
+    def _render_next_thumbnail(self):
+        """Render one thumbnail per event-loop tick (main thread, no pyplot global state)."""
+        if not _PIL_AVAILABLE or not self._thumb_render_queue:
             return
         THUMB_W, THUMB_H = 136, 82
-        for chart_type in CHART_TYPES:
-            try:
-                thumb_fig = Figure(figsize=(2.2, 1.35), dpi=62)
-                # Build same extra_args logic as _update_chart
-                chart_data = self.fleet
-                extra_args = {}
-                if chart_type == "Fleet Cash Flow" and self.electrification_analysis:
-                    chart_data = self.electrification_analysis
-                elif chart_type == "Electrification Potential" and self.electrification_analysis:
-                    chart_data = self.electrification_analysis
-                    extra_args = {
-                        "gas_price": self.gas_price_var.get(),
-                        "electricity_price": self.electricity_price_var.get(),
-                        "ev_efficiency": self.ev_efficiency_var.get(),
-                    }
-                elif chart_type in ("Emissions Reduction", "ROI Analysis") \
-                        and self.electrification_analysis:
-                    chart_data = self.electrification_analysis
-                elif chart_type in ("Annual Cost Comparison",):
-                    extra_args = {
-                        "gas_price": self.gas_price_var.get(),
-                        "electricity_price": self.electricity_price_var.get(),
-                        "ev_efficiency": self.ev_efficiency_var.get(),
-                    }
-                elif "Emission" in chart_type and self.emissions_inventory:
-                    chart_data = self.emissions_inventory
-                elif "Charging" in chart_type and self.charging_analysis:
-                    chart_data = self.charging_analysis
+        chart_type = self._thumb_render_queue.pop(0)
+        vars_ = self._thumb_render_vars
+        try:
+            thumb_fig = Figure(figsize=(2.2, 1.35), dpi=62)
+            chart_data = self.fleet
+            extra_args = {}
+            if chart_type == "Fleet Cash Flow" and self.electrification_analysis:
+                chart_data = self.electrification_analysis
+            elif chart_type == "Electrification Potential" and self.electrification_analysis:
+                chart_data = self.electrification_analysis
+                extra_args = {
+                    "gas_price": vars_["gas_price"],
+                    "electricity_price": vars_["electricity_price"],
+                    "ev_efficiency": vars_["ev_efficiency"],
+                }
+            elif chart_type in ("Emissions Reduction", "ROI Analysis") \
+                    and self.electrification_analysis:
+                chart_data = self.electrification_analysis
+            elif chart_type in ("Annual Cost Comparison",):
+                extra_args = {
+                    "gas_price": vars_["gas_price"],
+                    "electricity_price": vars_["electricity_price"],
+                    "ev_efficiency": vars_["ev_efficiency"],
+                }
+            elif "Emission" in chart_type and self.emissions_inventory:
+                chart_data = self.emissions_inventory
+            elif "Charging" in chart_type and self.charging_analysis:
+                chart_data = self.charging_analysis
 
-                ChartFactory.create_chart(
-                    chart_type=chart_type, data=chart_data, figure=thumb_fig,
-                    chart_style="minimal", color_scheme=self.color_scheme_var.get(),
-                    **extra_args,
-                )
-                thumb_fig.tight_layout(pad=0.1)
+            ChartFactory.create_chart(
+                chart_type=chart_type, data=chart_data, figure=thumb_fig,
+                chart_style="minimal", color_scheme=vars_["color_scheme"],
+                **extra_args,
+            )
+            # Strip all text decorations — at 136×82px they'd be unreadable smears
+            # and prevent tight_layout from fitting anyway.
+            for ax in thumb_fig.get_axes():
+                ax.set_title("")
+                ax.set_xlabel("")
+                ax.set_ylabel("")
+                ax.set_xticklabels([])
+                ax.set_yticklabels([])
+                ax.tick_params(left=False, bottom=False)
+            thumb_fig.tight_layout(pad=0.1)
 
-                buf = _io.BytesIO()
-                thumb_fig.savefig(buf, format="png", dpi=62,
-                                  bbox_inches="tight", facecolor="white")
-                buf.seek(0)
-                img = _PILImage.open(buf).resize((THUMB_W, THUMB_H), _PILImage.LANCZOS)
-                photo = _ImageTk.PhotoImage(img)
-                matplotlib.pyplot.close(thumb_fig)
-                buf.close()
+            buf = _io.BytesIO()
+            thumb_fig.savefig(buf, format="png", dpi=62,
+                              bbox_inches="tight", facecolor="white")
+            buf.seek(0)
+            raw_img = _PILImage.open(buf)
+            resized = raw_img.resize((THUMB_W, THUMB_H), _PILImage.LANCZOS)
+            raw_img.close()
+            photo = _ImageTk.PhotoImage(resized)
+            resized.close()
+            thumb_fig.clear()
+            buf.close()
 
-                self._chart_thumbnails[chart_type] = photo
-                # Schedule UI update on main thread
-                self.after(0, lambda ct=chart_type, ph=photo: self._apply_thumbnail(ct, ph))
-                # Discard the small figure to free memory
-                thumb_fig.clear()
-                del thumb_fig
-            except Exception as err:
-                logger.debug(f"Thumbnail render failed for {chart_type!r}: {err}")
+            self._chart_thumbnails[chart_type] = photo
+            self._apply_thumbnail(chart_type, photo)
+        except Exception as err:
+            logger.debug(f"Thumbnail render failed for {chart_type!r}: {err}")
+
+        if self._thumb_render_queue:
+            self.after(10, self._render_next_thumbnail)
 
     def _apply_thumbnail(self, chart_type: str, photo):
         """Update a thumbnail card with a rendered image (called on main thread)."""
@@ -1488,7 +1648,7 @@ class AnalysisPanel(ttk.Frame):
 
         ttk.Label(
             fleet_frame,
-            text="Affects CARB ACF mandate deadlines for Category B vehicles.\n"
+            text="Affects CARB ACF mandate deadlines for medium and heavy-duty vehicles subject to ACF.\n"
                  "Verify non-HPF milestones against current CARB regulatory text.",
             foreground="#666666",
             justify="left",
@@ -2172,12 +2332,18 @@ class AnalysisPanel(ttk.Frame):
                 progress.update(85, "Generating report...")
                 generator = ReportGeneratorFactory.create_generator(filepath)
                 if generator:
+                    # Cover-page client/date/presenter come from the per-fleet profile.
+                    client_profile = (self.sharing_data.get("presentation_profile")
+                                      if self.sharing_data is not None else None)
+                    state_code = getattr(self.fleet, "state_code", "") or "CA"
                     success = generator.generate(
                         fleet=self.fleet,
                         analysis=self.electrification_analysis,
                         charging=self.charging_analysis,
                         emissions=self.emissions_inventory,
                         timeline_options=timeline_options,
+                        client_profile=client_profile,
+                        state_code=state_code,
                     )
                     if success:
                         progress.update(100, "Report complete!")
@@ -2572,6 +2738,7 @@ class AnalysisPanel(ttk.Frame):
         self._update_priority_vehicles()
         self._update_tco_kpis()
         self._update_status_label()
+        self._update_purchase_schedule_chart()
         self._update_gantt_section()
         self._update_export_button_states()
 
@@ -2630,7 +2797,7 @@ class AnalysisPanel(ttk.Frame):
         self._snapshot_kpi_labels["fleet_size"].config(text=str(n))
 
         acf_b = sum(1 for v in vehicles
-                    if v.custom_fields.get("ACF Category", "") == "B")
+                    if v.custom_fields.get("_acf_code", "") == "B")
         self._snapshot_kpi_labels["acf_b_count"].config(text=str(acf_b))
 
         avg_mpg = self.fleet.avg_mpg
@@ -2658,7 +2825,7 @@ class AnalysisPanel(ttk.Frame):
             ax.axis("off")
             self._acf_canvas.draw()
             for cat, lbl in self._acf_count_labels.items():
-                lbl.config(text=f"Category {cat}: —")
+                lbl.config(text=f"{ACF_LABELS_SHORT.get(cat, cat)}: —")
             return
 
         counts: Dict[str, int] = {"ZEV": 0, "A": 0, "B": 0, "C": 0, "D": 0}
@@ -2693,7 +2860,9 @@ class AnalysisPanel(ttk.Frame):
         self._acf_canvas.draw()
 
         for cat, lbl in self._acf_count_labels.items():
-            lbl.config(text=f"Category {cat}: {counts.get(cat, 0)}")
+            n = counts.get(cat, 0)
+            pct = f" ({n/total:.0%})" if total > 0 and n > 0 else ""
+            lbl.config(text=f"{ACF_LABELS_SHORT.get(cat, cat)}: {n}{pct}")
 
     def _update_priority_vehicles(self):
         """Populate Top 5 Priority Vehicles table from electrification_analysis."""
@@ -2858,7 +3027,7 @@ class AnalysisPanel(ttk.Frame):
             vehicle.custom_fields["Original ACF Category"] = (
                 vehicle.custom_fields.get("ACF Category", "")
             )
-        vehicle.custom_fields["ACF Category"] = new_acf_code
+        vehicle.custom_fields["ACF Category"] = ACF_CODE_TO_LABEL.get(new_acf_code, new_acf_code)
         vehicle.custom_fields["_acf_code"] = new_acf_code
         vehicle.custom_fields["ACF Category Overridden"] = "Yes"
 
@@ -2868,7 +3037,7 @@ class AnalysisPanel(ttk.Frame):
         original = vehicle.custom_fields.get("Original ACF Category")
         if original is not None:
             vehicle.custom_fields["ACF Category"] = original
-            vehicle.custom_fields["_acf_code"] = original
+            vehicle.custom_fields["_acf_code"] = ACF_LABEL_TO_CODE.get(original, original)
         vehicle.custom_fields.pop("ACF Category Overridden", None)
         vehicle.custom_fields.pop("Original ACF Category", None)
 

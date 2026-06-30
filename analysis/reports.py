@@ -40,6 +40,47 @@ except ImportError:
 
 
 ###############################################################################
+# Canonical assumptions — single source of truth on the Cover sheet
+###############################################################################
+# Every financial sheet references these cells via cover_aref(); the Cover sheet
+# is the only place a user edits them. Percentages are stored as whole numbers
+# (e.g. 3.0 = 3%/yr) to match the TCO model's existing formula convention.
+
+COVER_SHEET_NAME = "Cover & Methodology"
+
+# First assumption value lives in column B of this 1-indexed Excel row.
+_ASSUMPTION_FIRST_ROW = 9
+
+# Ordered list of (key, label, kind). kind ∈ {money2, money0, num2, pct, int}.
+_ASSUMPTION_DEFS = [
+    ("gas_price",           "Gas price ($/gal)",                  "money2"),
+    ("electricity_price",   "Electricity price ($/kWh)",          "money2"),
+    ("ev_efficiency",       "EV efficiency (kWh/mile)",           "num2"),
+    ("ice_maintenance",     "ICE maintenance ($/mile)",           "money2"),
+    ("ev_maintenance",      "EV maintenance ($/mile)",            "money2"),
+    ("fuel_escalation",     "Fuel escalation (%/yr)",             "pct"),
+    ("discount_rate",       "Discount rate (%/yr)",               "pct"),
+    ("battery_degradation", "Battery degradation (%/yr)",         "pct"),
+    ("infra_cost_per_veh",  "Infrastructure cost / vehicle ($)",  "money0"),
+    ("analysis_period",     "Analysis period (years)",            "int"),
+]
+
+# key -> 1-indexed Excel row of its value cell in column B of the Cover sheet.
+_ASSUMPTION_ROW = {
+    key: _ASSUMPTION_FIRST_ROW + i for i, (key, _label, _kind) in enumerate(_ASSUMPTION_DEFS)
+}
+
+
+def cover_aref(key: str) -> str:
+    """Absolute cross-sheet reference to a canonical assumption cell (no leading '=').
+
+    e.g. cover_aref("gas_price") -> "'Cover & Methodology'!$B$9"
+    Wrap in "=" + cover_aref(...) to write a mirror formula, or embed in a larger one.
+    """
+    return f"'{COVER_SHEET_NAME}'!$B${_ASSUMPTION_ROW[key]}"
+
+
+###############################################################################
 # Report Generator Base Class
 ###############################################################################
 
@@ -137,17 +178,22 @@ class ExcelReportGenerator(ReportGenerator):
                charging: Optional[ChargingAnalysis] = None,
                emissions: Optional[EmissionsInventory] = None,
                fields: Optional[List[str]] = None,
-               timeline_options: Optional[dict] = None) -> bool:
+               timeline_options: Optional[dict] = None,
+               client_profile: Optional[Any] = None,
+               state_code: str = "CA") -> bool:
         """
         Generate an Excel report with data, charts, and analysis.
-        
+
         Args:
             fleet: Fleet object or list of vehicles
             analysis: Optional electrification analysis
             charging: Optional charging analysis
             emissions: Optional emissions inventory
             fields: List of fields to include (None for default fields)
-            
+            timeline_options: scenario year columns to append to Replacement sheet
+            client_profile: Optional PresentationProfile for cover-page client/date/presenter
+            state_code: Two-letter state code for incentive lookups (default "CA")
+
         Returns:
             True if successful, False otherwise
         """
@@ -195,7 +241,17 @@ class ExcelReportGenerator(ReportGenerator):
                 'border': 1,
                 'num_format': '#,##0.0'
             })
-            
+
+            # Stash report-wide context for sheet builders
+            self._client_profile = client_profile
+            self._state_code = state_code or "CA"
+
+            # Create Cover & Methodology sheet FIRST so cross-sheet assumption
+            # references ('Cover & Methodology'!$B$N) resolve for later sheets.
+            self._create_cover_sheet(workbook, vehicles, analysis, charging, emissions,
+                                     client_profile, title_format, header_format,
+                                     cell_format, number_format)
+
             # Create Vehicle Data sheet
             self._create_vehicle_data_sheet(workbook, vehicles, fields, title_format, header_format, cell_format, number_format)
             
@@ -236,6 +292,164 @@ class ExcelReportGenerator(ReportGenerator):
             logger.error(f"Error generating Excel report: {e}")
             return False
     
+    def _create_cover_sheet(self, workbook, vehicles, analysis, charging, emissions,
+                            client_profile, title_format, header_format,
+                            cell_format, number_format):
+        """Create the Cover & Methodology sheet.
+
+        Holds the canonical (single-source-of-truth) assumptions block that every
+        financial sheet references, plus client header, data-quality KPIs, a
+        methodology / data-source note, and the ACF glossary.
+        """
+        from settings import (
+            DEFAULT_GAS_PRICE, DEFAULT_ELECTRICITY_PRICE, DEFAULT_EV_EFFICIENCY,
+            DEFAULT_ICE_MAINTENANCE, DEFAULT_EV_MAINTENANCE,
+            DEFAULT_FUEL_ESCALATION_RATE, DEFAULT_BATTERY_DEGRADATION,
+            DEFAULT_INFRASTRUCTURE_COST_PER_VEHICLE,
+        )
+
+        ws = workbook.add_worksheet(COVER_SHEET_NAME)
+        ws.set_column('A:A', 34)
+        ws.set_column('B:B', 20)
+        ws.set_column('C:F', 16)
+        ws.hide_gridlines(2)
+
+        # ── Formats ──────────────────────────────────────────────────────────────
+        big_title_fmt = workbook.add_format({
+            'bold': True, 'font_size': 22, 'font_color': '#3C465A', 'valign': 'vcenter'})
+        client_fmt = workbook.add_format({
+            'bold': True, 'font_size': 16, 'font_color': '#C45911', 'valign': 'vcenter'})
+        meta_fmt = workbook.add_format({'font_size': 11, 'font_color': '#444444'})
+        section_fmt = workbook.add_format({
+            'bold': True, 'font_size': 12, 'bg_color': '#3C465A', 'font_color': 'white',
+            'border': 1, 'align': 'left', 'valign': 'vcenter'})
+        label_fmt = workbook.add_format({'border': 1, 'align': 'left'})
+        note_fmt = workbook.add_format({'italic': True, 'font_size': 9, 'font_color': '#7F8C8D'})
+        body_fmt = workbook.add_format({'text_wrap': True, 'valign': 'top', 'font_size': 10})
+        kpi_label_fmt = workbook.add_format({
+            'bold': True, 'bg_color': '#EAF2FB', 'border': 1, 'align': 'center', 'font_size': 9})
+        kpi_value_fmt = workbook.add_format({
+            'bold': True, 'font_size': 16, 'align': 'center', 'border': 1})
+        # Editable canonical assumption cells (yellow) — the only place users edit.
+        money2_in = workbook.add_format({'border': 2, 'bg_color': '#FFF9C4', 'num_format': '$#,##0.00', 'align': 'right'})
+        money0_in = workbook.add_format({'border': 2, 'bg_color': '#FFF9C4', 'num_format': '$#,##0', 'align': 'right'})
+        num2_in   = workbook.add_format({'border': 2, 'bg_color': '#FFF9C4', 'num_format': '#,##0.00', 'align': 'right'})
+        pct_in    = workbook.add_format({'border': 2, 'bg_color': '#FFF9C4', 'num_format': '0.00"%"', 'align': 'right'})
+        int_in    = workbook.add_format({'border': 2, 'bg_color': '#FFF9C4', 'num_format': '#,##0', 'align': 'right'})
+        _in_fmt = {'money2': money2_in, 'money0': money0_in, 'num2': num2_in, 'pct': pct_in, 'int': int_in}
+
+        # ── Header block (rows 1–6, 1-indexed) ───────────────────────────────────
+        prof = client_profile
+        client_name = (getattr(prof, 'client_name', '') or '').strip() or "Fleet Electrification Analysis"
+        meeting_date = (getattr(prof, 'meeting_date', '') or '').strip()
+        presenter = (getattr(prof, 'presenter_name', '') or '').strip()
+        presenter_co = (getattr(prof, 'presenter_company', '') or '').strip()
+        report_date = datetime.datetime.now().strftime("%B %d, %Y")
+
+        ws.set_row(0, 30)
+        ws.merge_range('A1:F1', "Fleet Electrification Analysis", big_title_fmt)
+        ws.set_row(1, 24)
+        ws.merge_range('A2:F2', client_name, client_fmt)
+        ws.write(2, 0, f"Report generated: {report_date}", meta_fmt)
+        prepared = "Prepared by: " + (f"{presenter}" + (f", {presenter_co}" if presenter_co else "") if presenter else (presenter_co or "—"))
+        ws.write(3, 0, prepared, meta_fmt)
+        if meeting_date:
+            ws.write(4, 0, f"Meeting date: {meeting_date}", meta_fmt)
+        ws.write(5, 0, f"Fleet size: {len(vehicles)} vehicles   |   Incentive region: {self._state_code}", meta_fmt)
+
+        # ── Global assumptions (header row 8; values rows 9..) ────────────────────
+        ws.merge_range('A8:C8', "Global Assumptions  (edit yellow cells — drives the TCO & Financials model)", section_fmt)
+
+        # Seed values: prefer the analysis object, else settings defaults.
+        def _a(attr, default):
+            return getattr(analysis, attr, default) if analysis is not None else default
+        seeds = {
+            "gas_price":           _a('gas_price', DEFAULT_GAS_PRICE),
+            "electricity_price":   _a('electricity_price', DEFAULT_ELECTRICITY_PRICE),
+            "ev_efficiency":       _a('ev_efficiency', DEFAULT_EV_EFFICIENCY),
+            "ice_maintenance":     DEFAULT_ICE_MAINTENANCE,
+            "ev_maintenance":      DEFAULT_EV_MAINTENANCE,
+            "fuel_escalation":     DEFAULT_FUEL_ESCALATION_RATE,
+            "discount_rate":       _a('discount_rate', 5.0),
+            "battery_degradation": DEFAULT_BATTERY_DEGRADATION,
+            "infra_cost_per_veh":  DEFAULT_INFRASTRUCTURE_COST_PER_VEHICLE,
+            "analysis_period":     int(_a('analysis_period', 12) or 12),
+        }
+        for key, label, kind in _ASSUMPTION_DEFS:
+            r0 = _ASSUMPTION_ROW[key] - 1  # 0-indexed
+            ws.write(r0, 0, label, label_fmt)
+            ws.write_number(r0, 1, float(seeds[key]), _in_fmt[kind])
+        note_row = _ASSUMPTION_FIRST_ROW + len(_ASSUMPTION_DEFS)  # 1-indexed row after block
+        ws.write(note_row, 0,
+                 "Yellow cells are the single source of truth; the TCO & Financials sheet mirrors them.",
+                 note_fmt)
+
+        # ── Data quality summary KPIs ────────────────────────────────────────────
+        row = note_row + 2  # 0-indexed cursor (note_row is 1-indexed → already one below)
+        ws.merge_range(row, 0, row, 5, "Data Quality Summary", section_fmt)
+        row += 1
+
+        q_scores = [getattr(v, 'data_quality_score', 0.0) for v in vehicles]
+        avg_quality = sum(q_scores) / len(q_scores) if q_scores else 0.0
+        with_mpg = [v for v in vehicles if getattr(v.fuel_economy, 'combined_mpg', 0)]
+        est_count = sum(1 for v in with_mpg if getattr(v.fuel_economy, 'mpg_is_estimate', False))
+        pct_est = (est_count / len(with_mpg) * 100) if with_mpg else 0.0
+        unresolved = sum(1 for v in vehicles
+                         if not getattr(v, 'processing_success', True) or not v.vehicle_id.make)
+        conf_vals = [getattr(v, 'match_confidence', 0.0) for v in vehicles
+                     if getattr(v, 'match_confidence', 0.0) > 0]
+        avg_conf = sum(conf_vals) / len(conf_vals) if conf_vals else 0.0
+
+        kpis = [
+            ("Avg Data Quality", f"{avg_quality:.0f}%"),
+            ("MPG Estimated", f"{pct_est:.0f}%"),
+            ("Unresolved VINs", f"{unresolved}"),
+            ("Avg Match Conf.", f"{avg_conf:.0f}%"),
+        ]
+        for col, (label, value) in enumerate(kpis):
+            ws.write(row, col, label, kpi_label_fmt)
+            ws.write(row + 1, col, value, kpi_value_fmt)
+        ws.write(row + 2, 0, "See the 'Infrastructure & Action Items' sheet for the vehicle-level data-gap punch list.", note_fmt)
+        row += 4
+
+        # ── Methodology & data sources ───────────────────────────────────────────
+        ws.merge_range(row, 0, row, 5, "Methodology & Data Sources", section_fmt)
+        row += 1
+        methodology = (
+            "VINs are decoded via the NHTSA vPIC API (make, model, year, GVWR, body class, fuel type). "
+            "MPG is resolved through a tiered cascade: FuelEconomy.gov (light-duty) → commercial sources "
+            "(Fuelly / EPA SmartWay / OEM) → an analyst-maintained SQLite reference DB → an EPA class-average "
+            "estimate by GVWR bucket (flagged as an estimate). Each vehicle is classified for CARB Advanced "
+            "Clean Fleets (ACF) and assigned a proposed electrification year via a score-based even-spread "
+            "model. Financials (TCO, savings, payback) come from a year-by-year cash-flow model driven by the "
+            "assumptions above. Incentives reflect the selected region and are applied to net cost."
+        )
+        ws.merge_range(row, 0, row + 4, 5, methodology, body_fmt)
+        row += 6
+
+        # ── ACF glossary ─────────────────────────────────────────────────────────
+        ws.merge_range(row, 0, row, 5, "ACF Classification Glossary", section_fmt)
+        row += 1
+        glossary = [
+            ("ZEV", "Already zero-emission — no replacement required."),
+            ("A",   "Exempt, light-duty (GVWR ≤ 8,500 lbs)."),
+            ("B",   "Mandate-subject, medium/heavy-duty — drives the compliance timeline."),
+            ("C",   "Exempt by body type (dump truck, crane, concrete mixer, etc.)."),
+            ("D",   "Emergency vehicle (PPV/SSV, ambulance, fire apparatus)."),
+        ]
+        for code, desc in glossary:
+            ws.write(row, 0, code, workbook.add_format({'border': 1, 'bold': True, 'align': 'center'}))
+            ws.merge_range(row, 1, row, 5, desc, label_fmt)
+            row += 1
+        row += 1
+
+        # ── Disclaimer ───────────────────────────────────────────────────────────
+        ws.merge_range(row, 0, row + 1, 5,
+                       "Estimates are for planning purposes only and depend on input data quality and "
+                       "assumptions. Figures flagged as estimates (e.g. EPA class-average MPG, synthetic "
+                       "emissions projections) should be validated before procurement decisions.",
+                       note_fmt)
+
     def _create_vehicle_data_sheet(self, workbook, vehicles, fields, title_format, header_format, cell_format, number_format):
         """Create the Vehicle Data sheet with all vehicle information."""
         # Create worksheet
