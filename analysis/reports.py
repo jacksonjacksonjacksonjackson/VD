@@ -265,9 +265,9 @@ class ExcelReportGenerator(ReportGenerator):
             if analysis and hasattr(analysis, 'fleet_cash_flows') and analysis.fleet_cash_flows:
                 self._create_tco_model_sheet(workbook, analysis, vehicles, title_format, header_format, cell_format, number_format)
 
-            # Create Charging Infrastructure sheet if available
-            if charging:
-                self._create_charging_sheet(workbook, charging, title_format, header_format, cell_format, number_format)
+            # Infrastructure & Action Items sheet (always — action items need only
+            # vehicles; charging sections are guarded internally).
+            self._create_charging_sheet(workbook, charging, vehicles, title_format, header_format, cell_format, number_format)
 
             # Create Emissions & Scenarios sheet if available
             if emissions:
@@ -882,93 +882,202 @@ class ExcelReportGenerator(ReportGenerator):
             
             row += 1
     
-    def _create_charging_sheet(self, workbook, charging, title_format, header_format, cell_format, number_format):
-        """Create Charging Infrastructure sheet."""
-        # Create worksheet
-        worksheet = workbook.add_worksheet("Charging Infrastructure")
-        
+    def _create_charging_sheet(self, workbook, charging, vehicles, title_format, header_format, cell_format, number_format):
+        """Create Infrastructure & Action Items sheet.
+
+        Top: charging infrastructure summary + recommended layout / phasing, and a
+        per-year buildout phased against the replacement schedule. Bottom: a data
+        gaps / action-items punch list so analysts know what to chase down.
+        """
+        worksheet = workbook.add_worksheet("Infrastructure & Action Items")
+
         # Add title
-        worksheet.merge_range('A1:D1', "Charging Infrastructure Analysis", title_format)
-        
+        worksheet.merge_range('A1:D1', "Infrastructure & Action Items", title_format)
+
         # Set column widths
-        worksheet.set_column('A:A', 25)
-        worksheet.set_column('B:D', 15)
-        
-        # Add parameters section
+        worksheet.set_column('A:A', 28)
+        worksheet.set_column('B:D', 16)
+
         row = 3
-        worksheet.write(row, 0, "Analysis Parameters:", header_format)
-        row += 1
-        
-        worksheet.write(row, 0, "Usage Pattern:")
-        worksheet.write(row, 1, charging.daily_usage_pattern.capitalize())
-        row += 1
-        
-        worksheet.write(row, 0, "Charging Window:")
-        window_text = f"{charging.charging_window[0]}:00 to {charging.charging_window[1]}:00"
-        worksheet.write(row, 1, window_text)
-        row += 1
-        
-        # Add results section
-        row += 2
-        worksheet.write(row, 0, "Infrastructure Requirements:", header_format)
-        row += 1
-        
-        worksheet.write(row, 0, "Level 2 Chargers:")
-        worksheet.write(row, 1, charging.level2_chargers_needed)
-        row += 1
-        
-        worksheet.write(row, 0, "DC Fast Chargers:")
-        worksheet.write(row, 1, charging.dcfc_chargers_needed)
-        row += 1
-        
-        worksheet.write(row, 0, "Maximum Power Required (kW):")
-        worksheet.write(row, 1, charging.max_power_required)
-        row += 1
-        
-        worksheet.write(row, 0, "Estimated Cost ($):")
-        worksheet.write(row, 1, charging.estimated_installation_cost)
-        row += 1
-        
-        # Add recommended layout
-        if charging.recommended_layout and "zones" in charging.recommended_layout:
+        if charging is not None:
+            worksheet.write(row, 0, "Analysis Parameters:", header_format)
+            row += 1
+
+            worksheet.write(row, 0, "Usage Pattern:")
+            worksheet.write(row, 1, charging.daily_usage_pattern.capitalize())
+            row += 1
+
+            worksheet.write(row, 0, "Charging Window:")
+            window_text = f"{charging.charging_window[0]}:00 to {charging.charging_window[1]}:00"
+            worksheet.write(row, 1, window_text)
+            row += 1
+
+            # Add results section
             row += 2
-            worksheet.write(row, 0, "Recommended Layout:", header_format)
+            worksheet.write(row, 0, "Infrastructure Requirements:", header_format)
             row += 1
-            
-            for i, zone in enumerate(charging.recommended_layout["zones"]):
-                worksheet.write(row, 0, f"Zone {i+1}: {zone.get('name', '')}")
+
+            worksheet.write(row, 0, "Level 2 Chargers:")
+            worksheet.write(row, 1, charging.level2_chargers_needed)
+            row += 1
+
+            worksheet.write(row, 0, "DC Fast Chargers:")
+            worksheet.write(row, 1, charging.dcfc_chargers_needed)
+            row += 1
+
+            worksheet.write(row, 0, "Maximum Power Required (kW):")
+            worksheet.write(row, 1, charging.max_power_required)
+            row += 1
+
+            worksheet.write(row, 0, "Estimated Cost ($):")
+            worksheet.write(row, 1, charging.estimated_installation_cost)
+            row += 1
+
+            # Add recommended layout
+            if charging.recommended_layout and "zones" in charging.recommended_layout:
+                row += 2
+                worksheet.write(row, 0, "Recommended Layout:", header_format)
                 row += 1
-                
-                worksheet.write(row, 0, "Level 2 Chargers:")
-                worksheet.write(row, 1, zone.get("level2_chargers", 0))
+
+                for i, zone in enumerate(charging.recommended_layout["zones"]):
+                    worksheet.write(row, 0, f"Zone {i+1}: {zone.get('name', '')}")
+                    row += 1
+
+                    worksheet.write(row, 0, "Level 2 Chargers:")
+                    worksheet.write(row, 1, zone.get("level2_chargers", 0))
+                    row += 1
+
+                    worksheet.write(row, 0, "DC Fast Chargers:")
+                    worksheet.write(row, 1, zone.get("dcfc_chargers", 0))
+                    row += 1
+
+                    worksheet.write(row, 0, "Power Required (kW):")
+                    worksheet.write(row, 1, zone.get("power_required", 0))
+                    row += 1
+
+            # Add phasing plan
+            if charging.recommended_layout and "phasing" in charging.recommended_layout:
+                row += 2
+                worksheet.write(row, 0, "Implementation Phasing:", header_format)
                 row += 1
-                
-                worksheet.write(row, 0, "DC Fast Chargers:")
-                worksheet.write(row, 1, zone.get("dcfc_chargers", 0))
+
+                headers = ["Phase", "Level 2 Chargers", "DC Fast Chargers", "Estimated Cost ($)"]
+                for col, header in enumerate(headers):
+                    worksheet.write(row, col, header, header_format)
                 row += 1
-                
-                worksheet.write(row, 0, "Power Required (kW):")
-                worksheet.write(row, 1, zone.get("power_required", 0))
-                row += 1
-        
-        # Add phasing plan
-        if charging.recommended_layout and "phasing" in charging.recommended_layout:
+
+                for phase in charging.recommended_layout["phasing"]:
+                    worksheet.write(row, 0, f"Phase {phase.get('phase', '')}")
+                    worksheet.write(row, 1, phase.get("level2_chargers", 0))
+                    worksheet.write(row, 2, phase.get("dcfc_chargers", 0))
+                    worksheet.write(row, 3, phase.get("estimated_cost", 0))
+                    row += 1
+
+            # Per-year charger buildout phased against the replacement schedule
+            row = self._write_charging_buildout(
+                worksheet, charging, vehicles, row + 2,
+                header_format, cell_format, number_format)
+        else:
+            worksheet.write(row, 0, "No charging analysis available for this run.", header_format)
             row += 2
-            worksheet.write(row, 0, "Implementation Phasing:", header_format)
+
+        # Data gaps / action items — always shown
+        self._write_action_items(worksheet, workbook, vehicles, row + 2,
+                                 title_format, header_format, cell_format)
+
+    def _write_charging_buildout(self, ws, charging, vehicles, start_row,
+                                 header_format, cell_format, number_format):
+        """Phase charger counts + cost across the years vehicles enter service."""
+        # Vehicles per replacement year
+        counts = {}
+        for v in vehicles:
+            yr = v.custom_fields.get('Proposed EV Year', '')
+            if yr and yr not in ('N/A', 'Exempt', ''):
+                try:
+                    counts[int(yr)] = counts.get(int(yr), 0) + 1
+                except (ValueError, TypeError):
+                    continue
+        years = sorted(counts)
+        total = sum(counts.values()) or 1
+        if not years:
+            return start_row
+
+        l2_total = getattr(charging, 'level2_chargers_needed', 0) or 0
+        dcfc_total = getattr(charging, 'dcfc_chargers_needed', 0) or 0
+        cost_total = float(getattr(charging, 'estimated_installation_cost', 0) or 0)
+
+        import math
+        row = start_row
+        ws.write(row, 0, "Charging Buildout by Year", header_format)
+        row += 1
+        for c, h in enumerate(["Year", "Vehicles", "L2 Chargers", "DC Fast Chargers", "Est. Cost ($)"]):
+            ws.write(row, c, h, header_format)
+        row += 1
+        for yr in years:
+            frac = counts[yr] / total
+            ws.write(row, 0, yr, cell_format)
+            ws.write(row, 1, counts[yr], cell_format)
+            ws.write(row, 2, math.ceil(l2_total * frac), cell_format)
+            ws.write(row, 3, math.ceil(dcfc_total * frac), cell_format)
+            ws.write(row, 4, round(cost_total * frac), number_format)
             row += 1
-            
-            headers = ["Phase", "Level 2 Chargers", "DC Fast Chargers", "Estimated Cost ($)"]
-            for col, header in enumerate(headers):
-                worksheet.write(row, col, header, header_format)
+        return row
+
+    def _write_action_items(self, ws, workbook, vehicles, start_row,
+                            title_format, header_format, cell_format):
+        """Data gaps / action-items punch list for the analyst."""
+        warn_fmt = workbook.add_format({'border': 1, 'bg_color': '#FDE0DC', 'font_color': '#B71C1C'})
+        ok_fmt = workbook.add_format({'border': 1, 'italic': True, 'font_color': '#1E8449'})
+
+        # Per-vehicle issue detection
+        rows = []
+        n_unresolved = n_odo = n_mileage = n_lowconf = n_est = 0
+        for v in vehicles:
+            issues = []
+            if not getattr(v, 'processing_success', True) or not v.vehicle_id.make:
+                issues.append("Unresolved VIN"); n_unresolved += 1
+            if not getattr(v, 'odometer', 0):
+                issues.append("Missing odometer"); n_odo += 1
+            if not getattr(v, 'annual_mileage', 0):
+                issues.append("Missing annual mileage"); n_mileage += 1
+            conf = getattr(v, 'match_confidence', 0) or 0
+            if 0 < conf < 60:
+                issues.append("Low match confidence"); n_lowconf += 1
+            if getattr(v.fuel_economy, 'mpg_is_estimate', False):
+                issues.append("MPG is an estimate"); n_est += 1
+            if issues:
+                rows.append((v.vin or '(no VIN)', "; ".join(issues)))
+
+        row = start_row
+        ws.merge_range(row, 0, row, 3, "Data Gaps & Action Items", title_format)
+        row += 1
+
+        # Summary counts
+        for label, count in [
+            ("Unresolved VINs", n_unresolved),
+            ("Missing odometer", n_odo),
+            ("Missing annual mileage", n_mileage),
+            ("Low match confidence (<60%)", n_lowconf),
+            ("MPG is an estimate", n_est),
+        ]:
+            ws.write(row, 0, label, header_format)
+            ws.write(row, 1, count, warn_fmt if count else cell_format)
             row += 1
-            
-            for phase in charging.recommended_layout["phasing"]:
-                worksheet.write(row, 0, f"Phase {phase.get('phase', '')}")
-                worksheet.write(row, 1, phase.get("level2_chargers", 0))
-                worksheet.write(row, 2, phase.get("dcfc_chargers", 0))
-                worksheet.write(row, 3, phase.get("estimated_cost", 0))
-                row += 1
-    
+        row += 1
+
+        if not rows:
+            ws.write(row, 0, "No data gaps detected — all vehicles fully resolved.", ok_fmt)
+            return
+
+        # Detailed punch list
+        ws.write(row, 0, "VIN", header_format)
+        ws.merge_range(row, 1, row, 3, "Issues to Resolve", header_format)
+        row += 1
+        for vin, issue_text in rows:
+            ws.write(row, 0, vin, cell_format)
+            ws.merge_range(row, 1, row, 3, issue_text, warn_fmt)
+            row += 1
+
     def _create_emissions_sheet(self, workbook, emissions, vehicles, title_format, header_format, cell_format, number_format):
         """Create Emissions & Scenarios sheet.
 
