@@ -273,10 +273,12 @@ class ExcelReportGenerator(ReportGenerator):
             if emissions:
                 self._create_emissions_sheet(workbook, emissions, title_format, header_format, cell_format, number_format)
 
+            max_per_year = getattr(fleet, 'max_vehicles_per_year', 0) if isinstance(fleet, Fleet) else 0
             self._create_replacement_schedule_sheet(
                 workbook, vehicles,
                 title_format, header_format, cell_format, number_format,
                 timeline_options=timeline_options,
+                charging=charging, max_per_year=max_per_year,
             )
 
             # Close workbook to save changes
@@ -1658,16 +1660,23 @@ class ExcelReportGenerator(ReportGenerator):
 
     def _create_replacement_schedule_sheet(
         self, workbook, vehicles, title_format, header_format, cell_format, number_format,
-        timeline_options: Optional[dict] = None,
+        timeline_options: Optional[dict] = None, charging=None, max_per_year: int = 0,
     ):
-        """Create Replacement Schedule sheet — Gantt-style table.
+        """Create Replacement & Capital Plan sheet.
+
+        Top: the Gantt-style replacement schedule (with scenario year columns and
+        override flagging). Bottom: a per-fiscal-year capital plan (vehicle + infra
+        capex, gross vs net-of-incentive, cumulative, and an over-cap flag) plus a
+        native spend-by-year column chart.
 
         timeline_options: dict of {scenario_key: bool} indicating which scenario
         year columns to append (from the Timelines to Include dialog).
+        charging: optional ChargingAnalysis, used to phase infrastructure capex.
+        max_per_year: Fleet.max_vehicles_per_year budget cap (0 = none) for flagging.
         """
         from analysis.scenarios import get_scenario_year_assignments, PRESET_SCENARIOS
 
-        ws = workbook.add_worksheet("Replacement Schedule")
+        ws = workbook.add_worksheet("Replacement & Capital Plan")
         currency_fmt = workbook.add_format({'border': 1, 'num_format': '$#,##0'})
         year_fmt     = workbook.add_format({'border': 1, 'align': 'center',
                                             'bg_color': '#D6EAF8'})
@@ -1676,7 +1685,7 @@ class ExcelReportGenerator(ReportGenerator):
         yes_fmt      = workbook.add_format({'border': 1, 'align': 'center',
                                             'bg_color': '#FFE0B2', 'bold': True})
 
-        ws.merge_range('A1:F1', "Vehicle Replacement Schedule", title_format)
+        ws.merge_range('A1:F1', "Vehicle Replacement & Capital Plan", title_format)
 
         # Compute scenario year assignments for selected timelines
         active_scenarios: list = []
@@ -1789,6 +1798,110 @@ class ExcelReportGenerator(ReportGenerator):
         total_cost = sum(s['ev_cost'] for s in scheduled)
         ws.write(summary_row + 1, 0, "Total estimated cost:", header_format)
         ws.write(summary_row + 1, 4, total_cost, currency_fmt)
+
+        # ── Capital Plan by Year ──────────────────────────────────────────────────
+        self._write_capital_plan(
+            ws, workbook, scheduled, vehicles, all_years, summary_row + 4,
+            charging, max_per_year,
+            title_format, header_format, cell_format, currency_fmt)
+
+    def _write_capital_plan(self, ws, workbook, scheduled, vehicles, all_years, start_row,
+                            charging, max_per_year,
+                            title_format, header_format, cell_format, currency_fmt):
+        """Per-fiscal-year capital plan appended below the replacement schedule."""
+        from analysis.rate_database import get_all_incentives
+
+        by_vin = {v.vin: v for v in vehicles}
+        inc_cache = dict(getattr(self, '_incentive_per_vehicle', {}) or {})
+
+        def _bucket_incentive(b):
+            if b not in inc_cache:
+                inc_cache[b] = float(get_all_incentives(
+                    getattr(self, '_state_code', 'CA') or 'CA', b).get('max_total', 0) or 0)
+            return inc_cache[b]
+
+        # Per-year aggregates
+        count = {yr: 0 for yr in all_years}
+        gross = {yr: 0.0 for yr in all_years}
+        incentive = {yr: 0.0 for yr in all_years}
+        for s in scheduled:
+            yr = s['ev_year']
+            v = by_vin.get(s['vin_full'])
+            bucket = self._bucket_for_incentive(v) if v is not None else 'medium_heavy'
+            per_veh_inc = min(_bucket_incentive(bucket), s['ev_cost'])
+            count[yr] += 1
+            gross[yr] += s['ev_cost']
+            incentive[yr] += per_veh_inc
+
+        # Infrastructure capex phased proportional to vehicles per year
+        total_infra = float(getattr(charging, 'estimated_installation_cost', 0) or 0) if charging else 0.0
+        n_sched = len(scheduled) or 1
+
+        over_fmt = workbook.add_format({'border': 1, 'align': 'center',
+                                        'bg_color': '#FFCDD2', 'font_color': '#B71C1C', 'bold': True})
+        total_fmt = workbook.add_format({'border': 1, 'bold': True, 'bg_color': '#ECEFF1',
+                                         'num_format': '$#,##0'})
+        total_lbl_fmt = workbook.add_format({'border': 1, 'bold': True, 'bg_color': '#ECEFF1'})
+
+        row = start_row
+        ws.merge_range(row, 0, row, 8, "Capital Plan by Year", title_format)
+        row += 1
+        heads = ["Year", "Vehicles", "Vehicle Capex", "Infra Capex", "Total Capex",
+                 "Est. Incentives", "Net Capex", "Cumulative Net", "Over Cap?"]
+        for c, h in enumerate(heads):
+            ws.write(row, c, h, header_format)
+        header_row = row
+        row += 1
+        data_first = row
+
+        cumulative = 0.0
+        t_count = t_gross = t_infra = t_inc = t_net = 0.0
+        for yr in all_years:
+            infra = total_infra * (count[yr] / n_sched)
+            total_capex = gross[yr] + infra
+            net = max(total_capex - incentive[yr], 0.0)
+            cumulative += net
+            over = (max_per_year and count[yr] > max_per_year)
+            ws.write(row, 0, yr, cell_format)
+            ws.write(row, 1, count[yr], cell_format)
+            ws.write(row, 2, gross[yr], currency_fmt)
+            ws.write(row, 3, infra, currency_fmt)
+            ws.write(row, 4, total_capex, currency_fmt)
+            ws.write(row, 5, incentive[yr], currency_fmt)
+            ws.write(row, 6, net, currency_fmt)
+            ws.write(row, 7, cumulative, currency_fmt)
+            ws.write(row, 8, f"⚠ >{max_per_year}" if over else "", over_fmt if over else cell_format)
+            t_count += count[yr]; t_gross += gross[yr]; t_infra += infra
+            t_inc += incentive[yr]; t_net += net
+            row += 1
+        data_last = row - 1
+
+        # Total row
+        ws.write(row, 0, "TOTAL", total_lbl_fmt)
+        ws.write(row, 1, int(t_count), total_lbl_fmt)
+        ws.write(row, 2, t_gross, total_fmt)
+        ws.write(row, 3, t_infra, total_fmt)
+        ws.write(row, 4, t_gross + t_infra, total_fmt)
+        ws.write(row, 5, t_inc, total_fmt)
+        ws.write(row, 6, t_net, total_fmt)
+        ws.write(row, 7, "", total_lbl_fmt)
+        ws.write(row, 8, "", total_lbl_fmt)
+
+        # Native column chart: Net Capex by year
+        if all_years:
+            SHEET = "Replacement & Capital Plan"
+            chart = workbook.add_chart({'type': 'column'})
+            chart.add_series({
+                'name': 'Net Capex',
+                'categories': [SHEET, data_first, 0, data_last, 0],
+                'values':     [SHEET, data_first, 6, data_last, 6],
+            })
+            chart.set_title({'name': 'Net Capital Outlay by Year'})
+            chart.set_x_axis({'name': 'Year'})
+            chart.set_y_axis({'name': 'Net Capex ($)'})
+            chart.set_legend({'none': True})
+            chart.set_size({'width': 560, 'height': 280})
+            ws.insert_chart(header_row, 10, chart)
 
     def _create_summary_dashboard_sheet(self, workbook, vehicles, analysis, charging, emissions, title_format, header_format, cell_format, number_format):
         """Create Summary Dashboard sheet with KPI reference cells."""
