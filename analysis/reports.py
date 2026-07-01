@@ -259,21 +259,19 @@ class ExcelReportGenerator(ReportGenerator):
             self._create_fleet_overview_sheet(workbook, vehicles, analysis, charging, emissions,
                                               title_format, header_format, cell_format, number_format)
 
-            # Create Electrification Analysis sheet if available
-            if analysis:
-                self._create_electrification_sheet(workbook, analysis, title_format, header_format, cell_format, number_format)
-            
+            # TCO & Financials sheet (cash-flow model + incentives + per-vehicle savings).
+            # Per-vehicle savings detail was folded in here from the old standalone
+            # Electrification Analysis sheet.
+            if analysis and hasattr(analysis, 'fleet_cash_flows') and analysis.fleet_cash_flows:
+                self._create_tco_model_sheet(workbook, analysis, vehicles, title_format, header_format, cell_format, number_format)
+
             # Create Charging Infrastructure sheet if available
             if charging:
                 self._create_charging_sheet(workbook, charging, title_format, header_format, cell_format, number_format)
-            
+
             # Create Emissions Inventory sheet if available
             if emissions:
                 self._create_emissions_sheet(workbook, emissions, title_format, header_format, cell_format, number_format)
-
-            # Phase 9I: Analysis-ready sheets
-            if analysis and hasattr(analysis, 'fleet_cash_flows') and analysis.fleet_cash_flows:
-                self._create_tco_model_sheet(workbook, analysis, vehicles, title_format, header_format, cell_format, number_format)
 
             self._create_replacement_schedule_sheet(
                 workbook, vehicles,
@@ -1135,7 +1133,7 @@ class ExcelReportGenerator(ReportGenerator):
             DEFAULT_INFRASTRUCTURE_COST_PER_VEHICLE
         )
 
-        ws = workbook.add_worksheet("TCO Model")
+        ws = workbook.add_worksheet("TCO & Financials")
 
         # ── Formats ─────────────────────────────────────────────────────────────
         currency_fmt = workbook.add_format({'border': 1, 'num_format': '$#,##0', 'align': 'right'})
@@ -1153,6 +1151,14 @@ class ExcelReportGenerator(ReportGenerator):
             'border': 2, 'num_format': '#,##0', 'align': 'right',
             'bg_color': '#EAF2FB'
         })
+        # Mirror formats (grey) — cells linked to the canonical Cover assumptions;
+        # edit on the Cover sheet, not here.
+        mirror_num_fmt = workbook.add_format({
+            'border': 1, 'num_format': '#,##0.00', 'align': 'right', 'bg_color': '#ECEFF1', 'font_color': '#546E7A'})
+        mirror_pct_fmt = workbook.add_format({
+            'border': 1, 'num_format': '0.00', 'align': 'right', 'bg_color': '#ECEFF1', 'font_color': '#546E7A'})
+        mirror_int_fmt = workbook.add_format({
+            'border': 1, 'num_format': '#,##0', 'align': 'right', 'bg_color': '#ECEFF1', 'font_color': '#546E7A'})
         label_fmt    = workbook.add_format({'border': 1, 'bold': False, 'align': 'left'})
         note_fmt     = workbook.add_format({'border': 1, 'italic': True, 'font_color': '#2471A3'})
         payback_fmt  = workbook.add_format({
@@ -1188,9 +1194,9 @@ class ExcelReportGenerator(ReportGenerator):
         ASSUMP_START_ROW  = 3   # 0-idx → Excel row 4  (first input row)
 
         ws.merge_range(ASSUMP_HEADER_ROW, 0, ASSUMP_HEADER_ROW, 9,
-                       "⚙ Assumptions — Edit yellow cells to recalculate the model", header_format)
+                       "⚙ Assumptions — linked to the Cover sheet (edit there to recalculate the model)", header_format)
         ws.write(ASSUMP_HEADER_ROW + 1, 0,
-                 "Changes to yellow cells instantly update all formula cells below.",
+                 "Grey cells mirror the canonical assumptions on the 'Cover & Methodology' sheet.",
                  hint_fmt)
 
         # Derive baseline values from the first vehicle's cash flow data if possible
@@ -1238,12 +1244,31 @@ class ExcelReportGenerator(ReportGenerator):
             ("Avg Annual Mileage (read-only)",  round(avg_mileage, 0),                      input_int_fmt, "B16"),
         ]
 
+        # Cells B4–B12 and B14 mirror the canonical Cover assumptions via formula,
+        # so the entire model is driven from one place. B13 (fleet size) and the
+        # B15/B16 read-only aggregates stay as locally-computed values.
+        MIRROR_TO_COVER = {
+            "B4": "gas_price",        "B5": "electricity_price",   "B6": "ev_efficiency",
+            "B7": "ice_maintenance",  "B8": "ev_maintenance",      "B9": "fuel_escalation",
+            "B10": "discount_rate",   "B11": "battery_degradation", "B12": "infra_cost_per_veh",
+            "B14": "analysis_period",
+        }
+        _mirror_fmt_for = {input_fmt: mirror_num_fmt,
+                           input_pct_fmt: mirror_pct_fmt,
+                           input_int_fmt: mirror_int_fmt}
+
         # Named cells for formula references (0-indexed row, col 1 = column B)
         ASSUMP_ROWS = {}  # key → 0-indexed row number
         for i, (label, value, fmt, cell_hint) in enumerate(assumptions_def):
             r = ASSUMP_START_ROW + i
             ws.write(r, 0, label, label_fmt)
-            ws.write(r, 1, value, fmt)
+            cover_key = MIRROR_TO_COVER.get(cell_hint)
+            if cover_key:
+                # Linked mirror cell — value is the cached fallback until Excel recalcs.
+                ws.write_formula(r, 1, "=" + cover_aref(cover_key),
+                                 _mirror_fmt_for.get(fmt, mirror_num_fmt), value)
+            else:
+                ws.write(r, 1, value, fmt)
             ASSUMP_ROWS[cell_hint] = r  # store for formula building
 
         blank_row = ASSUMP_START_ROW + len(assumptions_def)  # one blank separator row
@@ -1471,6 +1496,165 @@ class ExcelReportGenerator(ReportGenerator):
             r = SUMMARY_START + 1 + j
             ws.write(r, 0, lbl, label_fmt)
             ws.write_formula(r, 1, formula, fmt)
+
+        # ── Funding & Incentives ──────────────────────────────────────────────────
+        next_row = self._write_incentives_block(
+            ws, vehicles, SUMMARY_START + len(kpis) + 3,
+            header_format, label_fmt, currency_fmt, hint_fmt, kpi_title_fmt)
+
+        # ── Per-vehicle savings detail (folded in from the old Electrification sheet) ──
+        if analysis is not None and getattr(analysis, 'vehicle_results', None):
+            self._write_per_vehicle_savings(
+                ws, vehicles, analysis, next_row + 2,
+                header_format, label_fmt, currency_fmt, number_format, cell_format, hint_fmt)
+
+    def _bucket_for_incentive(self, vehicle) -> str:
+        """Map a vehicle to an incentive vehicle_class bucket: 'light' or 'medium_heavy'.
+
+        ACF-A is light-duty (GVWR ≤ 8,500 lbs); everything else mandate-relevant is
+        treated as medium/heavy for incentive purposes.
+        """
+        code = (vehicle.custom_fields.get('_acf_code')
+                or vehicle.custom_fields.get('ACF Category', '') or '').strip().upper()
+        if code == 'A':
+            return 'light'
+        return 'medium_heavy'
+
+    def _write_incentives_block(self, ws, vehicles, start_row,
+                                header_format, label_fmt, currency_fmt, hint_fmt, kpi_title_fmt):
+        """Append a Funding & Incentives table to the TCO & Financials sheet.
+
+        Groups replaceable vehicles into incentive buckets, looks up the max
+        stackable federal+state incentive per bucket for the report's region, and
+        shows gross EV cost, max incentive, and net cost after incentives. Also
+        caches per-bucket per-vehicle incentive on self for the Capital Plan sheet.
+        """
+        from analysis.rate_database import get_all_incentives
+
+        state = getattr(self, '_state_code', 'CA') or 'CA'
+
+        # Aggregate by bucket — only vehicles with a real EV purchase price.
+        buckets = {}  # bucket -> {count, gross}
+        for v in vehicles:
+            price = float(v.custom_fields.get('_ev_purchase_price', 0) or 0)
+            code = (v.custom_fields.get('_acf_code')
+                    or v.custom_fields.get('ACF Category', '') or '').strip().upper()
+            if price <= 0 or code == 'ZEV':
+                continue
+            b = self._bucket_for_incentive(v)
+            entry = buckets.setdefault(b, {'count': 0, 'gross': 0.0})
+            entry['count'] += 1
+            entry['gross'] += price
+
+        # Per-vehicle max incentive per bucket (cached for the Capital Plan sheet).
+        self._incentive_per_vehicle = {}
+
+        row = start_row
+        ws.merge_range(row, 0, row, 5,
+                       f"Funding & Incentives  (region: {state} — max stackable, planning upper bound)",
+                       header_format)
+        row += 1
+        col_heads = ["Vehicle Group", "Vehicles", "Gross EV Cost",
+                     "Max Incentive / Veh", "Est. Max Fleet Incentive", "Net Cost After Incentives"]
+        for c, h in enumerate(col_heads):
+            ws.write(row, c, h, header_format)
+        row += 1
+
+        bucket_labels = {'light': 'Light-Duty (ACF-A)', 'medium_heavy': 'Medium/Heavy (ACF-B/C/D)'}
+        tot_count = tot_gross = tot_incentive = 0.0
+        for b in ('light', 'medium_heavy'):
+            if b not in buckets:
+                continue
+            data = buckets[b]
+            inc = get_all_incentives(state, b)
+            per_veh = float(inc.get('max_total', 0) or 0)
+            self._incentive_per_vehicle[b] = per_veh
+            fleet_inc = min(per_veh * data['count'], data['gross'])  # never exceed gross
+            net = max(data['gross'] - fleet_inc, 0.0)
+            ws.write(row, 0, bucket_labels[b], label_fmt)
+            ws.write(row, 1, data['count'], label_fmt)
+            ws.write(row, 2, data['gross'], currency_fmt)
+            ws.write(row, 3, per_veh, currency_fmt)
+            ws.write(row, 4, fleet_inc, currency_fmt)
+            ws.write(row, 5, net, currency_fmt)
+            tot_count += data['count']; tot_gross += data['gross']; tot_incentive += fleet_inc
+            row += 1
+
+        if not buckets:
+            ws.write(row, 0, "No vehicles with EV pricing available for incentive analysis.", hint_fmt)
+            row += 1
+        else:
+            ws.write(row, 0, "TOTAL", kpi_title_fmt)
+            ws.write(row, 1, int(tot_count), kpi_title_fmt)
+            ws.write(row, 2, tot_gross, currency_fmt)
+            ws.write(row, 3, "", kpi_title_fmt)
+            ws.write(row, 4, tot_incentive, currency_fmt)
+            ws.write(row, 5, max(tot_gross - tot_incentive, 0.0), currency_fmt)
+            row += 1
+        ws.write(row, 0,
+                 "Federal: IRA 45W (commercial) + 30D (light). State programs vary by region. "
+                 "Amounts are program maxima and may not all stack in practice — validate before procurement.",
+                 hint_fmt)
+        return row + 1
+
+    def _write_per_vehicle_savings(self, ws, vehicles, analysis, start_row,
+                                   header_format, label_fmt, currency_fmt,
+                                   number_format, cell_format, hint_fmt):
+        """Per-vehicle savings table (folded in from the old Electrification sheet).
+
+        Payback uses each vehicle's real EV purchase price and pre-computed
+        _payback_years rather than the former hardcoded $15,000 premium.
+        """
+        by_vin = {v.vin: v for v in vehicles}
+        results = analysis.vehicle_results or {}
+        order = [vin for vin in (getattr(analysis, 'prioritized_vehicles', None) or []) if vin in results]
+        if not order:
+            order = [vin for vin, _ in sorted(
+                results.items(), key=lambda x: x[1].get("total_npv_savings", 0), reverse=True)]
+
+        row = start_row
+        ws.merge_range(row, 0, row, 6, "Per-Vehicle Savings Detail", header_format)
+        row += 1
+        heads = ["Vehicle", "Annual Mileage", "MPG", "Annual Fuel Savings",
+                 "Lifetime Fuel Savings", "CO₂ Reduction (t)", "Payback (yr)"]
+        for c, h in enumerate(heads):
+            ws.write(row, c, h, header_format)
+        row += 1
+
+        for vin in order:
+            data = results[vin]
+            v = by_vin.get(vin)
+            display = data.get("display_name", vin)
+            annual_mileage = data.get("annual_mileage", 0)
+            mpg = data.get("mpg", 0)
+            annual_fuel = data.get("annual_fuel_savings", 0)
+            lifetime_fuel = data.get("total_fuel_savings", 0)
+            co2 = data.get("total_co2_reduction", 0)
+
+            # Real per-vehicle payback — prefer the pre-computed value, else derive
+            # from the actual EV purchase premium (NOT a flat $15k).
+            payback = None
+            if v is not None:
+                pb = v.custom_fields.get('_payback_years')
+                try:
+                    payback = float(pb) if pb not in (None, '', 'N/A') else None
+                except (ValueError, TypeError):
+                    payback = None
+                if payback is None:
+                    premium = float(v.custom_fields.get('_ev_purchase_price', 0) or 0)
+                    annual_total = annual_fuel + data.get("annual_maintenance_savings", 0)
+                    payback = premium / annual_total if (premium > 0 and annual_total > 0) else None
+
+            ws.write(row, 0, display, cell_format)
+            ws.write(row, 1, annual_mileage, number_format)
+            ws.write(row, 2, mpg, number_format)
+            ws.write(row, 3, annual_fuel, currency_fmt)
+            ws.write(row, 4, lifetime_fuel, currency_fmt)
+            ws.write(row, 5, co2, number_format)
+            ws.write(row, 6, "N/A" if payback is None else round(payback, 1),
+                     cell_format if payback is None else number_format)
+            row += 1
+        return row
 
     def _create_replacement_schedule_sheet(
         self, workbook, vehicles, title_format, header_format, cell_format, number_format,
