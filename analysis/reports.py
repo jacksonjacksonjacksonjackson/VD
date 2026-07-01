@@ -259,20 +259,16 @@ class ExcelReportGenerator(ReportGenerator):
             self._create_fleet_overview_sheet(workbook, vehicles, analysis, charging, emissions,
                                               title_format, header_format, cell_format, number_format)
 
-            # TCO & Financials sheet (cash-flow model + incentives + per-vehicle savings).
-            # Per-vehicle savings detail was folded in here from the old standalone
-            # Electrification Analysis sheet.
+            # Sheet order (cover + 6): Cover → Vehicle Data → Fleet Overview →
+            # TCO & Financials → Replacement & Capital Plan → Emissions & Scenarios
+            # → Infrastructure & Action Items.
+
+            # TCO & Financials sheet (cash-flow model + incentives + per-vehicle
+            # savings; per-vehicle detail folded in from the old Electrification sheet).
             if analysis and hasattr(analysis, 'fleet_cash_flows') and analysis.fleet_cash_flows:
                 self._create_tco_model_sheet(workbook, analysis, vehicles, title_format, header_format, cell_format, number_format)
 
-            # Infrastructure & Action Items sheet (always — action items need only
-            # vehicles; charging sections are guarded internally).
-            self._create_charging_sheet(workbook, charging, vehicles, title_format, header_format, cell_format, number_format)
-
-            # Create Emissions & Scenarios sheet if available
-            if emissions:
-                self._create_emissions_sheet(workbook, emissions, vehicles, title_format, header_format, cell_format, number_format)
-
+            # Replacement & Capital Plan
             max_per_year = getattr(fleet, 'max_vehicles_per_year', 0) if isinstance(fleet, Fleet) else 0
             self._create_replacement_schedule_sheet(
                 workbook, vehicles,
@@ -280,6 +276,14 @@ class ExcelReportGenerator(ReportGenerator):
                 timeline_options=timeline_options,
                 charging=charging, max_per_year=max_per_year,
             )
+
+            # Emissions & Scenarios (if emissions available)
+            if emissions:
+                self._create_emissions_sheet(workbook, emissions, vehicles, title_format, header_format, cell_format, number_format)
+
+            # Infrastructure & Action Items sheet (always — action items need only
+            # vehicles; charging sections are guarded internally).
+            self._create_charging_sheet(workbook, charging, vehicles, title_format, header_format, cell_format, number_format)
 
             # Close workbook to save changes
             workbook.close()
@@ -624,264 +628,6 @@ class ExcelReportGenerator(ReportGenerator):
         row = _write_table(row + 11, "Fuel Type", fuel_dist, 'pie')
         row = _write_table(row + 11, "Top Makes", make_dist, 'column')
 
-    def _create_summary_sheet(self, workbook, vehicles, title_format, header_format):
-        """Create a summary sheet with fleet statistics and charts."""
-        # Create worksheet
-        worksheet = workbook.add_worksheet("Summary")
-        
-        # Add title
-        worksheet.merge_range('A1:D1', "Fleet Summary", title_format)
-        
-        # Set column widths
-        worksheet.set_column('A:A', 20)
-        worksheet.set_column('B:B', 15)
-        worksheet.set_column('C:D', 10)
-        
-        # Basic statistics
-        row = 3
-        worksheet.write(row, 0, "Total Vehicles:", header_format)
-        worksheet.write(row, 1, len(vehicles))
-        
-        # Count makes and models
-        makes = {}
-        models = {}
-        fuel_types = {}
-        body_classes = {}
-        
-        # Calculate stats
-        mpg_values = []
-        co2_values = []
-        
-        for vehicle in vehicles:
-            # Count makes
-            make = vehicle.vehicle_id.make
-            if make:
-                makes[make] = makes.get(make, 0) + 1
-            
-            # Count models
-            model = vehicle.vehicle_id.model
-            if model:
-                models[model] = models.get(model, 0) + 1
-            
-            # Count fuel types
-            fuel_type = vehicle.vehicle_id.fuel_type
-            if fuel_type:
-                fuel_types[fuel_type] = fuel_types.get(fuel_type, 0) + 1
-            
-            # Count body classes
-            body_class = vehicle.vehicle_id.body_class
-            if body_class:
-                body_classes[body_class] = body_classes.get(body_class, 0) + 1
-            
-            # MPG stats
-            mpg = vehicle.fuel_economy.combined_mpg
-            if mpg and mpg > 0:
-                mpg_values.append(mpg)
-            
-            # CO2 stats
-            co2 = vehicle.fuel_economy.co2_primary
-            if co2 and co2 > 0:
-                co2_values.append(co2)
-        
-        # Add make distribution
-        row += 2
-        worksheet.write(row, 0, "Make Distribution:", header_format)
-        row += 1
-        
-        # Sort makes by count
-        sorted_makes = sorted(makes.items(), key=lambda x: x[1], reverse=True)
-        for make, count in sorted_makes[:10]:  # Top 10
-            worksheet.write(row, 0, make)
-            worksheet.write(row, 1, count)
-            # Add simple bar using cell background
-            for i in range(min(count, 10)):
-                worksheet.write(row, 2 + i, "", workbook.add_format({'bg_color': '#5B7553'}))  # PRIMARY_HEX_3
-            row += 1
-        
-        # Add fuel type distribution
-        row += 2
-        worksheet.write(row, 0, "Fuel Type Distribution:", header_format)
-        row += 1
-        
-        sorted_fuel_types = sorted(fuel_types.items(), key=lambda x: x[1], reverse=True)
-        for fuel_type, count in sorted_fuel_types:
-            worksheet.write(row, 0, fuel_type)
-            worksheet.write(row, 1, count)
-            # Add simple bar using cell background
-            for i in range(min(count, 10)):
-                worksheet.write(row, 2 + i, "", workbook.add_format({'bg_color': '#C45911'}))  # SECONDARY_HEX_1
-            row += 1
-        
-        # Add MPG stats
-        row += 2
-        worksheet.write(row, 0, "MPG Statistics:", header_format)
-        row += 1
-        
-        if mpg_values:
-            avg_mpg = sum(mpg_values) / len(mpg_values)
-            min_mpg = min(mpg_values)
-            max_mpg = max(mpg_values)
-            
-            worksheet.write(row, 0, "Average MPG:")
-            worksheet.write(row, 1, avg_mpg)
-            row += 1
-            
-            worksheet.write(row, 0, "Minimum MPG:")
-            worksheet.write(row, 1, min_mpg)
-            row += 1
-            
-            worksheet.write(row, 0, "Maximum MPG:")
-            worksheet.write(row, 1, max_mpg)
-            row += 1
-        else:
-            worksheet.write(row, 0, "No MPG data available")
-            row += 1
-        
-        # Add CO2 stats
-        row += 2
-        worksheet.write(row, 0, "CO2 Emissions Statistics:", header_format)
-        row += 1
-        
-        if co2_values:
-            avg_co2 = sum(co2_values) / len(co2_values)
-            min_co2 = min(co2_values)
-            max_co2 = max(co2_values)
-            
-            worksheet.write(row, 0, "Average CO2 (g/mile):")
-            worksheet.write(row, 1, avg_co2)
-            row += 1
-            
-            worksheet.write(row, 0, "Minimum CO2 (g/mile):")
-            worksheet.write(row, 1, min_co2)
-            row += 1
-            
-            worksheet.write(row, 0, "Maximum CO2 (g/mile):")
-            worksheet.write(row, 1, max_co2)
-            row += 1
-        else:
-            worksheet.write(row, 0, "No CO2 data available")
-            row += 1
-    
-    def _create_electrification_sheet(self, workbook, analysis, title_format, header_format, cell_format, number_format):
-        """Create Electrification Analysis sheet."""
-        # Create worksheet
-        worksheet = workbook.add_worksheet("Electrification Analysis")
-        
-        # Add title
-        worksheet.merge_range('A1:F1', "Fleet Electrification Analysis", title_format)
-        
-        # Set column widths
-        worksheet.set_column('A:A', 25)
-        worksheet.set_column('B:F', 15)
-        
-        # Add summary section
-        row = 3
-        worksheet.write(row, 0, "Analysis Parameters:", header_format)
-        row += 1
-        
-        worksheet.write(row, 0, "Gas Price ($/gal):")
-        worksheet.write(row, 1, analysis.gas_price)
-        row += 1
-        
-        worksheet.write(row, 0, "Electricity Price ($/kWh):")
-        worksheet.write(row, 1, analysis.electricity_price)
-        row += 1
-        
-        worksheet.write(row, 0, "EV Efficiency (kWh/mile):")
-        worksheet.write(row, 1, analysis.ev_efficiency)
-        row += 1
-        
-        worksheet.write(row, 0, "Analysis Period (years):")
-        worksheet.write(row, 1, analysis.analysis_period)
-        row += 1
-        
-        worksheet.write(row, 0, "Discount Rate (%):")
-        worksheet.write(row, 1, analysis.discount_rate)
-        row += 1
-        
-        # Add results section
-        row += 2
-        worksheet.write(row, 0, "Analysis Results:", header_format)
-        row += 1
-        
-        worksheet.write(row, 0, "Total CO2 Savings (tons):")
-        worksheet.write(row, 1, analysis.co2_savings)
-        row += 1
-        
-        worksheet.write(row, 0, "Fuel Cost Savings ($):")
-        worksheet.write(row, 1, analysis.fuel_cost_savings)
-        row += 1
-        
-        worksheet.write(row, 0, "Maintenance Savings ($):")
-        worksheet.write(row, 1, analysis.maintenance_savings)
-        row += 1
-        
-        worksheet.write(row, 0, "Total Savings ($):")
-        worksheet.write(row, 1, analysis.total_savings)
-        row += 1
-        
-        worksheet.write(row, 0, "Payback Period (years):")
-        worksheet.write(row, 1, analysis.payback_period)
-        row += 1
-        
-        # Add vehicle results table
-        row += 2
-        worksheet.write(row, 0, "Vehicle-Level Results:", header_format)
-        row += 1
-        
-        # Create headers
-        headers = [
-            "Vehicle", "Annual Mileage", "MPG", "Annual Fuel Savings ($)", 
-            "Lifetime Fuel Savings ($)", "CO2 Reduction (tons)", "Payback Period (years)"
-        ]
-        
-        for col, header in enumerate(headers):
-            worksheet.write(row, col, header, header_format)
-        
-        row += 1
-        
-        # Sort vehicles by savings (if we have the prioritized list)
-        vehicles_to_show = []
-        for vin in analysis.prioritized_vehicles:
-            if vin in analysis.vehicle_results:
-                vehicles_to_show.append((vin, analysis.vehicle_results[vin]))
-        
-        # If no prioritized list, just sort by savings
-        if not vehicles_to_show:
-            vehicles_to_show = sorted(
-                analysis.vehicle_results.items(),
-                key=lambda x: x[1].get("total_npv_savings", 0),
-                reverse=True
-            )
-        
-        # Add data for top vehicles
-        for vin, data in vehicles_to_show:
-            display_name = data.get("display_name", vin)
-            annual_mileage = data.get("annual_mileage", 0)
-            mpg = data.get("mpg", 0)
-            annual_savings = data.get("annual_fuel_savings", 0)
-            total_savings = data.get("total_fuel_savings", 0)
-            co2_reduction = data.get("total_co2_reduction", 0)
-            
-            # Calculate payback (assuming $15k premium)
-            ev_premium = 15000
-            annual_total_savings = annual_savings + data.get("annual_maintenance_savings", 0)
-            payback = ev_premium / annual_total_savings if annual_total_savings > 0 else float('inf')
-            
-            worksheet.write(row, 0, display_name, cell_format)
-            worksheet.write(row, 1, annual_mileage, number_format)
-            worksheet.write(row, 2, mpg, number_format)
-            worksheet.write(row, 3, annual_savings, number_format)
-            worksheet.write(row, 4, total_savings, number_format)
-            worksheet.write(row, 5, co2_reduction, number_format)
-            
-            if payback == float('inf'):
-                worksheet.write(row, 6, "N/A", cell_format)
-            else:
-                worksheet.write(row, 6, payback, number_format)
-            
-            row += 1
-    
     def _create_charging_sheet(self, workbook, charging, vehicles, title_format, header_format, cell_format, number_format):
         """Create Infrastructure & Action Items sheet.
 
@@ -2108,96 +1854,6 @@ class ExcelReportGenerator(ReportGenerator):
             chart.set_legend({'none': True})
             chart.set_size({'width': 560, 'height': 280})
             ws.insert_chart(header_row, 10, chart)
-
-    def _create_summary_dashboard_sheet(self, workbook, vehicles, analysis, charging, emissions, title_format, header_format, cell_format, number_format):
-        """Create Summary Dashboard sheet with KPI reference cells."""
-        ws = workbook.add_worksheet("Summary Dashboard")
-        kpi_title_fmt = workbook.add_format({
-            'bold': True, 'font_size': 11, 'bg_color': '#2C3E50',
-            'font_color': 'white', 'border': 1, 'align': 'center'
-        })
-        kpi_value_fmt = workbook.add_format({
-            'bold': True, 'font_size': 16, 'align': 'center',
-            'border': 1, 'num_format': '$#,##0'
-        })
-        kpi_text_fmt = workbook.add_format({
-            'bold': True, 'font_size': 16, 'align': 'center', 'border': 1
-        })
-
-        ws.merge_range('A1:F1', "Fleet Electrification — Executive Summary Dashboard", title_format)
-        ws.set_column(0, 5, 22)
-
-        # Row 3-4: Fleet KPIs
-        fleet_kpis = [
-            ("Fleet Size", str(len(vehicles)), False),
-            ("Avg MPG", f"{sum(v.fuel_economy.combined_mpg or 0 for v in vehicles) / max(1, sum(1 for v in vehicles if v.fuel_economy.combined_mpg)):,.1f}", False),
-        ]
-
-        if analysis:
-            fleet_kpis.extend([
-                ("Annual Savings", analysis.total_savings, True),
-                ("CO₂ Reduction", f"{analysis.co2_savings:,.1f} MT", False),
-                ("Payback Period", f"{analysis.payback_period:.1f} yr", False),
-            ])
-
-        if charging:
-            fleet_kpis.append(
-                ("Infrastructure Cost", charging.estimated_installation_cost, True)
-            )
-
-        for col, (title, value, is_currency) in enumerate(fleet_kpis):
-            ws.write(2, col, title, kpi_title_fmt)
-            if is_currency:
-                ws.write(3, col, value, kpi_value_fmt)
-            else:
-                ws.write(3, col, str(value), kpi_text_fmt)
-
-        # Row 6+: Breakdown tables
-        row = 6
-        if emissions and emissions.by_department:
-            ws.write(row, 0, "Emissions by Department", header_format)
-            ws.write(row, 1, "MT CO2e", header_format)
-            row += 1
-            for dept, em in sorted(emissions.by_department.items(), key=lambda x: x[1], reverse=True):
-                ws.write(row, 0, dept, cell_format)
-                ws.write(row, 1, em, number_format)
-                row += 1
-            row += 1
-
-        # ACF breakdown
-        acf_counts = {}
-        for v in vehicles:
-            code = v.custom_fields.get('ACF Category', '')
-            if code:
-                acf_counts[code] = acf_counts.get(code, 0) + 1
-
-        if acf_counts:
-            ws.write(row, 0, "ACF Classification", header_format)
-            ws.write(row, 1, "Count", header_format)
-            row += 1
-            for cat, count in sorted(acf_counts.items()):
-                ws.write(row, 0, cat, cell_format)
-                ws.write(row, 1, count, cell_format)
-                row += 1
-            row += 1
-
-        # EV year distribution
-        year_counts = {}
-        for v in vehicles:
-            yr = v.custom_fields.get('Proposed EV Year', '')
-            if yr and yr not in ('N/A', 'Exempt'):
-                year_counts[yr] = year_counts.get(yr, 0) + 1
-
-        if year_counts:
-            ws.write(row, 0, "Replacement Year", header_format)
-            ws.write(row, 1, "Vehicles", header_format)
-            row += 1
-            for yr, count in sorted(year_counts.items()):
-                ws.write(row, 0, yr, cell_format)
-                ws.write(row, 1, count, cell_format)
-                row += 1
-
-
 
 ###############################################################################
 # PDF Export — REMOVED (Phase 5 Fix 40 / Phase 13 Fix G)

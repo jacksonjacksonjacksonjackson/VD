@@ -14,12 +14,12 @@ Desktop Python/Tkinter app for fleet electrification consulting. Decodes vehicle
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| VIN pipeline (Process tab) | ✓ Working | Core workflow, 226 tests passing |
+| VIN pipeline (Process tab) | ✓ Working | Core workflow, 279 tests passing |
 | Results table | ✓ Working | Right-click menu, ACF override, MPG DB save |
 | Analysis dashboard | ✓ Working | Charts, KPIs, scenario comparison, Gantt |
 | ACF classification | ✓ Working | ZEV/A/B/C/D; HPF/Non-HPF/State Agency support |
 | Electrification timeline | ✓ Working | Phase 28 even-spread w/ GVWR-tiered boost |
-| Excel export (8-tab) | ✓ Working | Override flagging, 4-scenario year columns |
+| Excel export (cover + 6) | ✓ Working | v2 (Phase 29): Cover-linked assumptions, incentives, capital plan, scenarios, action items |
 | PowerPoint export | ⚠️ Known issues | Charts occasionally wrong/incomplete; template quality variable |
 | Timeline tab | ✓ Working (low use) | Inline editing works; rarely needed in practice |
 | Charging tab | 🚧 Stub | UI scaffolding present; no analysis engine yet |
@@ -39,7 +39,7 @@ python3 app.py -b -i in.csv -o out.csv  # Batch mode
 ### Testing
 
 ```bash
-python3 -m pytest tests/ -v           # Run all 226 tests
+python3 -m pytest tests/ -v           # Run all 279 tests
 python3 -m pytest tests/ -v -k acf    # ACF tests only
 python3 -m pytest tests/ -v --tb=short
 ```
@@ -76,7 +76,7 @@ ui/
 analysis/
   calculations.py       → TCO, ROI, emissions, year-by-year cash flow model
   charts.py             → Matplotlib chart generation (22 chart types via ChartFactory)
-  reports.py            → Excel multi-tab report generation (8 worksheets)
+  reports.py            → Excel report generation (v2: cover + 6 worksheets)
   acf_compliance.py     → CARB ACF classification per vehicle (ZEV/A/B/C/D)
   electrification_timeline.py → Score-based even-spread year assignment + GVWR-tiered boost
   ev_database.py        → EV equivalent matching (~25 entries, reliability limited for heavy-duty)
@@ -106,6 +106,7 @@ tests/
   test_match_confidence.py
   test_timeline_override.py
   test_pptx_smoke.py               → 13 headless PPTX assertions (Phase 26)
+  test_excel_report.py             → Excel report v2 structural assertions (Phase 29)
 ```
 
 ---
@@ -216,11 +217,20 @@ Template file: `assets/template_default.pptx`. If building a new/improved templa
 
 `ElectrificationScenario` dataclass has `include_light_duty: bool` field. `compare_scenarios()` returns per-year vehicles/cost/co2/savings. Scope presets run to user-configured horizon year via `dataclasses.replace()`.
 
-### Excel Export
+### Excel Export (v2 — Phase 29: cover + 6 sheets)
 
 - **Results tab "Export"** → single-sheet "Fleet Analysis" (raw vehicle data only)
-- **Analysis tab "Export" or File > Export Report** → 8-tab report: Vehicle Data, Summary, Electrification Analysis, Charging Infrastructure, Emissions Inventory, TCO Model (live Excel formulas), Replacement Schedule, Summary Dashboard
-- **Timelines to Include dialog** (triggered at `.xlsx` export): 4 scenario checkboxes (all checked by default) → additional year columns in Replacement Schedule sheet + amber override flagging
+- **Analysis tab "Export" or File > Export Report** → **cover + 6-sheet** report:
+  0. **Cover & Methodology** — client header (from `PresentationProfile`), **canonical single-source-of-truth assumptions block** (`'Cover & Methodology'!$B$9:$B$18`, keyed by `_ASSUMPTION_ROW` / `cover_aref()`), data-quality KPIs, methodology + data-source note, ACF glossary, disclaimer
+  1. **Vehicle Data** — flat per-VIN table with quality-flag highlighting (MPG estimate amber, low quality/failed red, low match confidence)
+  2. **Fleet Overview** — merged old Summary + Summary Dashboard: KPI band + ACF/fuel/make composition tables with native pie/column charts
+  3. **TCO & Financials** — live cash-flow model (assumption cells B4–B12/B14 mirror the Cover via formula), Funding & Incentives block (`get_all_incentives()`, light/medium_heavy buckets), per-vehicle savings (real `_payback_years`, no $15k hack)
+  4. **Replacement & Capital Plan** — Gantt schedule + per-fiscal-year capital plan (vehicle+infra capex, net-of-incentive, cumulative, over-cap flag) + native spend chart
+  5. **Emissions & Scenarios** — emissions inventory + 4-scenario comparison (`compare_scenarios`) + native CO₂ trajectory chart; projected emissions flagged when `is_synthetic`
+  6. **Infrastructure & Action Items** — charging summary + per-year buildout + Data Gaps punch list
+- `generate()` takes `client_profile` + `state_code` (default `"CA"`); wired from `analysis_panel.export_full_report()` via `sharing_data["presentation_profile"]`.
+- **Timelines to Include dialog** (triggered at `.xlsx` export): 4 scenario checkboxes (all checked by default) → additional year columns in Replacement schedule + amber override flagging
+- Structural tests in `tests/test_excel_report.py`.
 
 ---
 
@@ -266,7 +276,8 @@ Template selection is still secondary in the UI. When a client `.pptx` template 
 |-------|-------------|
 | 26 | PPTX smoke test (13 assertions). Underscore-field CSV guard. HPF/Non-HPF/State Agency fleet type toggle (`ACF_DEADLINE_TABLE_NON_HPF`, `fleet_type` param, 3 radio buttons in Analysis tab). DB CSV bulk import implemented (~115 lines, flexible header aliasing). 220 tests passing. |
 | 27 | ACF display bug fixes (donut, Gantt, Timeline filter all now use `_acf_code` not label). Chart kwargs crash fix. Analysis tab layout reorder (Parameters first). Chart Gallery replaces Chart Browser (main canvas + thumbnail strip, PIL, "Include in PPTX" checkbox). Multi-scenario Gantt view (`_gantt_by_scenario()`). PPTX: `add_co2_trajectory_chart()` + `add_cumulative_investment_chart()`; `scenario_results` wired through `sharing_data`. Present tab: Treeview replaced with 2-column card gallery. Charging tab added (Tab 5, stub). Database shifts to Tab 6. 220 tests passing. |
-| 28 | Cat B even-spread: all Cat B now use score queue with GVWR-tiered boost constants (0.35/0.25/0.15/0.30); CARB deadline stored in `custom_fields["ACF Deadline Year"]` for reference only. New PPTX chart builders: `_add_purchase_schedule_chart()` (4-series A/B/C/D) + `_add_milestone_option_chart()` (Cat B split by GVWR); new optional `timeline_milestone` slide. GHG fix: `_scenario_baseline_co2` now computed via `_calculate_baseline_emissions()` (was always 0.0). `_clear_body_placeholders()` on optional slides. Font patched to Avenir LT Std Book via `scripts/update_template_font.py`. `Fleet.max_vehicles_per_year` + "Max Annual Replacements" spinbox. 226 tests passing (+6). |
+| 28 | Cat B even-spread: all Cat B now use score queue with GVWR-tiered boost constants (0.35/0.25/0.15/0.30); CARB deadline stored in `custom_fields["ACF Deadline Year"]` for reference only. New PPTX chart builders: `_add_purchase_schedule_chart()` (4-series A/B/C/D) + `_add_milestone_option_chart()` (Cat B split by GVWR); new optional `timeline_milestone` slide. GHG fix: `_scenario_baseline_co2` now computed via `_calculate_baseline_emissions()` (was always 0.0). `_clear_body_placeholders()` on optional slides. Font patched to Avenir LT Std Book via `scripts/update_template_font.py`. `Fleet.max_vehicles_per_year` + "Max Annual Replacements" spinbox. 279 tests passing (+6). |
+| 29 | **Excel report v2 rebuild** (`analysis/reports.py`, branch `feature/excel-report-v2`): 8 loosely-coupled sheets → **cover + 6**. New **Cover & Methodology** sheet holds the canonical assumptions block (`cover_aref()` / `_ASSUMPTION_ROW`); TCO cells B4–B12/B14 mirror it by formula (single source of truth). Merged Summary+Dashboard → **Fleet Overview** (native charts); merged Electrification+TCO → **TCO & Financials** (+ Funding & Incentives via `get_all_incentives()`; **fixed the hardcoded $15k EV-premium payback bug** → real `_payback_years`); **Replacement & Capital Plan** (per-year capex, net-of-incentive, over-cap flag); **Emissions & Scenarios** (`compare_scenarios` table + CO₂ trajectory chart, `is_synthetic` flag); **Infrastructure & Action Items** (per-year buildout + data-gap punch list). Vehicle Data gained quality-flag highlighting. `generate()` gained `client_profile` + `state_code`. Removed dead `_create_summary_sheet` / `_create_summary_dashboard_sheet` / `_create_electrification_sheet`. `tests/test_excel_report.py` (+9). 279 tests passing. |
 
 ---
 
@@ -278,6 +289,6 @@ Copy and paste this to start a new development session:
 I'm continuing development of my Fleet Electrification Analyzer app.
 Branch: uiux/v3_0_3 | Version: see settings.py APP_VERSION
 Review CLAUDE.md fully before starting — it is the single source of truth.
-Run: python3 -m pytest tests/ -v (expect 226 passing)
+Run: python3 -m pytest tests/ -v (expect 279 passing)
 Focus this session: [DESCRIBE TASK]
 ```
