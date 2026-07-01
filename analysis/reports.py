@@ -269,9 +269,9 @@ class ExcelReportGenerator(ReportGenerator):
             if charging:
                 self._create_charging_sheet(workbook, charging, title_format, header_format, cell_format, number_format)
 
-            # Create Emissions Inventory sheet if available
+            # Create Emissions & Scenarios sheet if available
             if emissions:
-                self._create_emissions_sheet(workbook, emissions, title_format, header_format, cell_format, number_format)
+                self._create_emissions_sheet(workbook, emissions, vehicles, title_format, header_format, cell_format, number_format)
 
             max_per_year = getattr(fleet, 'max_vehicles_per_year', 0) if isinstance(fleet, Fleet) else 0
             self._create_replacement_schedule_sheet(
@@ -969,13 +969,19 @@ class ExcelReportGenerator(ReportGenerator):
                 worksheet.write(row, 3, phase.get("estimated_cost", 0))
                 row += 1
     
-    def _create_emissions_sheet(self, workbook, emissions, title_format, header_format, cell_format, number_format):
-        """Create Emissions Inventory sheet."""
+    def _create_emissions_sheet(self, workbook, emissions, vehicles, title_format, header_format, cell_format, number_format):
+        """Create Emissions & Scenarios sheet.
+
+        Top: the emissions inventory (totals + by department / vehicle type / fuel
+        type; canonical home for these breakdowns). Bottom: a side-by-side
+        comparison of the four time-based scenarios plus a native CO₂ trajectory
+        line chart.
+        """
         # Create worksheet
-        worksheet = workbook.add_worksheet("Emissions Inventory")
-        
+        worksheet = workbook.add_worksheet("Emissions & Scenarios")
+
         # Add title
-        worksheet.merge_range('A1:D1', "Fleet Emissions Inventory", title_format)
+        worksheet.merge_range('A1:D1', "Fleet Emissions & Scenario Comparison", title_format)
         
         # Set column widths
         worksheet.set_column('A:A', 25)
@@ -1025,9 +1031,12 @@ class ExcelReportGenerator(ReportGenerator):
         # Add projected data
         if emissions.projected_emissions:
             row += 2
-            worksheet.write(row, 0, "Projected Emissions:", header_format)
+            label = "Projected Emissions:"
+            if getattr(emissions, 'is_synthetic', False):
+                label = "Projected Emissions (illustrative / synthetic):"
+            worksheet.write(row, 0, label, header_format)
             row += 1
-            
+
             headers = ["Year", "Emissions (tons CO2e)"]
             for col, header in enumerate(headers):
                 worksheet.write(row, col, header, header_format)
@@ -1089,12 +1098,100 @@ class ExcelReportGenerator(ReportGenerator):
             
             for ftype, value in sorted(emissions.by_fuel_type.items(), key=lambda x: x[1], reverse=True):
                 percentage = (value / emissions.total_emissions * 100) if emissions.total_emissions > 0 else 0
-                
+
                 worksheet.write(row, 0, ftype)
                 worksheet.write(row, 1, value, number_format)
                 worksheet.write(row, 2, f"{percentage:.1f}%")
                 row += 1
 
+        # ── Scenario comparison + CO₂ trajectory chart ────────────────────────────
+        self._write_scenario_comparison(worksheet, workbook, vehicles, row + 2,
+                                        title_format, header_format, cell_format, number_format)
+
+    def _write_scenario_comparison(self, ws, workbook, vehicles, start_row,
+                                   title_format, header_format, cell_format, number_format):
+        """Side-by-side comparison of the 4 time-based scenarios + CO₂ trajectory chart."""
+        from analysis.scenarios import compare_scenarios
+
+        SHEET = "Emissions & Scenarios"
+        time_based = ["aggressive", "moderate", "conservative", "acf_compliance"]
+        try:
+            comp = compare_scenarios(vehicles, scenario_names=time_based)
+        except Exception as e:  # scenarios are best-effort; never fail the report
+            logger.warning("Scenario comparison skipped: %s", e)
+            return
+
+        table = comp.get("comparison_table", [])
+        scenarios = comp.get("scenarios", [])
+        if not table:
+            return
+
+        money_fmt = workbook.add_format({'border': 1, 'num_format': '$#,##0', 'align': 'right'})
+        num_fmt   = workbook.add_format({'border': 1, 'num_format': '#,##0.0', 'align': 'right'})
+        flag_fmt  = workbook.add_format({'border': 1, 'bold': True, 'bg_color': '#D5F5E3', 'align': 'center'})
+
+        row = start_row
+        ws.merge_range(row, 0, row, 6, "Scenario Comparison (time-based presets)", title_format)
+        row += 1
+        heads = ["Scenario", "Vehicles", "End Year", "Total Investment",
+                 "Annual Savings", "Annual CO₂ Reduction (t)", "Payback (yr)"]
+        for c, h in enumerate(heads):
+            ws.write(row, c, h, header_format)
+        row += 1
+
+        best_roi = comp.get("best_roi", "")
+        lowest_cost = comp.get("lowest_cost", "")
+        fastest = comp.get("fastest", "")
+        for r in table:
+            payback = r.get("payback_years", float('inf'))
+            ws.write(row, 0, r.get("name", ""), cell_format)
+            ws.write(row, 1, r.get("vehicles", 0), cell_format)
+            ws.write(row, 2, r.get("end_year", ""), cell_format)
+            ws.write(row, 3, r.get("total_investment", 0), money_fmt)
+            ws.write(row, 4, r.get("total_annual_savings", 0), money_fmt)
+            ws.write(row, 5, r.get("total_annual_co2_reduction", 0), num_fmt)
+            ws.write(row, 6, "N/A" if payback in (float('inf'), None) else round(payback, 1),
+                     cell_format if payback in (float('inf'), None) else num_fmt)
+            row += 1
+
+        # Best-in-class callouts
+        ws.write(row, 0, "Best ROI:", header_format);       ws.write(row, 1, best_roi, flag_fmt)
+        ws.write(row + 1, 0, "Lowest cost:", header_format); ws.write(row + 1, 1, lowest_cost, flag_fmt)
+        ws.write(row + 2, 0, "Fastest:", header_format);     ws.write(row + 2, 1, fastest, flag_fmt)
+        row += 4
+
+        # ── CO₂ trajectory: cumulative reduction per scenario, per year ───────────
+        all_years = comp.get("all_years", [])
+        if not all_years or not scenarios:
+            return
+        ws.write(row, 0, "Cumulative CO₂ Reduction by Year (metric tons)", header_format)
+        chart_data_header = row + 1
+        # Header row: Year | <scenario names>
+        ws.write(chart_data_header, 0, "Year", header_format)
+        for si, sc in enumerate(scenarios):
+            ws.write(chart_data_header, 1 + si, sc.get("name", f"Scenario {si+1}"), header_format)
+        data_first = chart_data_header + 1
+        for yi, yr in enumerate(all_years):
+            r = data_first + yi
+            ws.write(r, 0, yr, cell_format)
+            for si, sc in enumerate(scenarios):
+                cumul = sc.get("cumulative_co2_reduction", {}) or {}
+                ws.write(r, 1 + si, cumul.get(yr, cumul.get(str(yr), 0)) or 0, num_fmt)
+        data_last = data_first + len(all_years) - 1
+
+        chart = workbook.add_chart({'type': 'line'})
+        for si, sc in enumerate(scenarios):
+            chart.add_series({
+                'name':       [SHEET, chart_data_header, 1 + si],
+                'categories': [SHEET, data_first, 0, data_last, 0],
+                'values':     [SHEET, data_first, 1 + si, data_last, 1 + si],
+                'marker':     {'type': 'circle', 'size': 4},
+            })
+        chart.set_title({'name': 'CO₂ Reduction Trajectory by Scenario'})
+        chart.set_x_axis({'name': 'Year'})
+        chart.set_y_axis({'name': 'Cumulative CO₂ Reduction (t)'})
+        chart.set_size({'width': 640, 'height': 320})
+        ws.insert_chart(chart_data_header, 2 + len(scenarios), chart)
 
     def _create_tco_model_sheet(self, workbook, analysis, vehicles, title_format, header_format, cell_format, number_format):
         """Create TCO Model sheet with a live-formula assumptions block and year-by-year cash flows.
