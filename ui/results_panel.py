@@ -1063,7 +1063,7 @@ Summary of Selected Vehicles ({len(selected_vehicles)})
         Shows a small dialog with a dropdown of all valid ACF categories.
         If the user confirms, applies the override and fires on_acf_override_callback.
         """
-        from ui.analysis_panel import ACF_LABELS, _show_acf_ev_year_dialog, AnalysisPanel
+        from ui.analysis_panel import ACF_LABELS, ACF_CODE_TO_LABEL, ACF_LABEL_TO_CODE, _show_acf_ev_year_dialog, AnalysisPanel
         from analysis.electrification_timeline import assign_electrification_years
 
         selected_iids = self.tree.selection()
@@ -1075,11 +1075,12 @@ Summary of Selected Vehicles ({len(selected_vehicles)})
         if vehicle is None:
             return
 
-        old_code = vehicle.custom_fields.get("ACF Category", "")
+        old_label = vehicle.custom_fields.get("ACF Category", "")
+        old_code = vehicle.custom_fields.get("_acf_code", "")
 
         # ── Category picker dialog ────────────────────────────────────────────
         picker = tk.Toplevel(self)
-        picker.title("Override ACF Category")
+        picker.title("Override Vehicle ACF Designation")
         picker.resizable(False, False)
         picker.transient(self.winfo_toplevel())
         picker.grab_set()
@@ -1098,30 +1099,20 @@ Summary of Selected Vehicles ({len(selected_vehicles)})
 
         ttk.Label(
             picker,
-            text=f"Override ACF Category for:\n{vehicle_label}",
+            text=f"Override ACF Designation for:\n{vehicle_label}",
             font=("TkDefaultFont", 10, "bold"),
         ).pack(padx=20, pady=(16, 4), anchor="w")
 
         ttk.Label(
             picker,
-            text=f"Current category: {old_code} — {ACF_LABELS.get(old_code, old_code)}",
+            text=f"Current: {old_label}",
             foreground="#555",
         ).pack(padx=20, pady=(0, 8), anchor="w")
 
-        ttk.Label(picker, text="New category:").pack(padx=20, anchor="w")
-        options = [
-            f"ZEV — {ACF_LABELS['ZEV']}",
-            f"A — {ACF_LABELS['A']}",
-            f"B — {ACF_LABELS['B']}",
-            f"C — {ACF_LABELS['C']}",
-            f"D — {ACF_LABELS['D']}",
-        ]
-        combo = ttk.Combobox(picker, values=options, state="readonly", width=28)
-        # Pre-select current category
-        current_option = next(
-            (opt for opt in options if opt.startswith(old_code + " — ")),
-            options[0],
-        )
+        ttk.Label(picker, text="New designation:").pack(padx=20, anchor="w")
+        options = list(ACF_CODE_TO_LABEL.values())
+        combo = ttk.Combobox(picker, values=options, state="readonly", width=48)
+        current_option = old_label if old_label in options else options[0]
         combo.set(current_option)
         combo.pack(padx=20, pady=(4, 12), anchor="w")
 
@@ -1146,7 +1137,7 @@ Summary of Selected Vehicles ({len(selected_vehicles)})
         if raw_choice == "cancel" or not raw_choice:
             return
 
-        new_code = raw_choice.split(" — ")[0].strip()
+        new_code = ACF_LABEL_TO_CODE.get(raw_choice, raw_choice)
         if new_code == old_code:
             return  # No change
 
@@ -1210,7 +1201,7 @@ Summary of Selected Vehicles ({len(selected_vehicles)})
 
         dialog = tk.Toplevel(self)
         dialog.title("Save MPG to Database")
-        dialog.geometry("440x400")
+        dialog.geometry("440x460")
         dialog.resizable(False, False)
         dialog.transient(self.winfo_toplevel())
         dialog.grab_set()
@@ -1299,6 +1290,29 @@ Summary of Selected Vehicles ({len(selected_vehicles)})
         add_row("MPG City:",       "mpg_city",     mpg_city, 8)
         add_row("MPG Highway:",    "mpg_highway",  mpg_hwy,  8)
 
+        # GVWR weight class — pre-select from decoded vehicle data
+        _GVWR_OPTIONS = [
+            "",
+            "Class 2b–4 (8,501–19,500 lbs)",
+            "Class 5–8a (19,501–33,000 lbs)",
+            "Class 8b (33,001+ lbs)",
+        ]
+        _GVWR_BOUNDS = {
+            "Class 2b–4 (8,501–19,500 lbs)":   (8501,  19500),
+            "Class 5–8a (19,501–33,000 lbs)":  (19501, 33000),
+            "Class 8b (33,001+ lbs)":                    (33001, None),
+        }
+        gvwr_lbs = vehicle.vehicle_id.gvwr_pounds or 0
+        if gvwr_lbs > 33000:
+            _gvwr_default = "Class 8b (33,001+ lbs)"
+        elif gvwr_lbs > 19500:
+            _gvwr_default = "Class 5–8a (19,501–33,000 lbs)"
+        elif gvwr_lbs > 8500:
+            _gvwr_default = "Class 2b–4 (8,501–19,500 lbs)"
+        else:
+            _gvwr_default = ""
+        add_combo("GVWR Class:", "gvwr_class", _GVWR_OPTIONS, _gvwr_default, 28)
+
         add_combo("Source:", "source",
                   ["analyst", "manufacturer_spec", "fuelly", "epa_label", "fleet_record"],
                   "analyst", 18)
@@ -1356,6 +1370,9 @@ Summary of Selected Vehicles ({len(selected_vehicles)})
                 except ValueError:
                     return 0.0
 
+            gvwr_sel = fields["gvwr_class"].get().strip()
+            gvwr_min, gvwr_max = _GVWR_BOUNDS.get(gvwr_sel, (None, None))
+
             try:
                 self.db_manager.add_ice_vehicle(
                     year         = year,
@@ -1363,6 +1380,8 @@ Summary of Selected Vehicles ({len(selected_vehicles)})
                     model        = model,
                     fuel_type    = fields["fuel_type"].get().strip() or None,
                     body_class   = vehicle.vehicle_id.body_class or None,
+                    gvwr_lbs_min = gvwr_min,
+                    gvwr_lbs_max = gvwr_max,
                     mpg_combined = mpg_combined,
                     mpg_city     = _safe_float("mpg_city"),
                     mpg_highway  = _safe_float("mpg_highway"),
@@ -1687,5 +1706,5 @@ Summary of Selected Vehicles ({len(selected_vehicles)})
         # Still not found, try the vehicle's get_field method as last resort
         try:
             return vehicle.get_field(col_id)
-        except:
+        except Exception:
             return ""

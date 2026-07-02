@@ -193,7 +193,9 @@ class MainWindow:
         file_menu = Menu(menubar, tearoff=0)
         file_menu.add_command(label="New Fleet", command=self.new_fleet)
         file_menu.add_command(label="Open Input File...", command=self.open_input_file)
+        file_menu.add_command(label="Open Project...", command=self.open_project)
         file_menu.add_separator()
+        file_menu.add_command(label="Save Project...", command=self.save_project_file)
         file_menu.add_command(label="Save Results...", command=self.save_results)
         file_menu.add_command(label="Export Report...", command=self.export_report)
         file_menu.add_separator()
@@ -453,9 +455,11 @@ class MainWindow:
         except Exception as exc:
             logger.warning(f"Could not refresh Timeline after ACF override: {exc}")
         try:
+            self.analysis_panel._update_purchase_schedule_chart()
             self.analysis_panel._update_gantt_section()
+            self.analysis_panel._update_acf_donut()
         except Exception as exc:
-            logger.warning(f"Could not refresh Analysis Gantt after ACF override: {exc}")
+            logger.warning(f"Could not refresh Analysis charts after ACF override: {exc}")
 
     def _reset_all_ev_overrides(self):
         """Tools menu: reset all manual EV-year overrides in the current fleet."""
@@ -651,7 +655,97 @@ class MainWindow:
         user clicked.
         """
         self.analysis_panel.export_full_report()
-    
+
+    # ------------------------------------------------------------------
+    # Project save / load (.fea)
+    # ------------------------------------------------------------------
+
+    def save_project_file(self):
+        """Serialize the current Fleet + scenario results to a .fea file."""
+        if not self.fleet.vehicles:
+            messagebox.showinfo("No Data", "There are no vehicles to save.")
+            return
+
+        filepath = filedialog.asksaveasfilename(
+            title="Save Project",
+            defaultextension=".fea",
+            filetypes=[("Fleet Electrification Analyzer Project", "*.fea"),
+                       ("All Files", "*.*")],
+        )
+        if not filepath:
+            return
+
+        try:
+            from data.project_io import save_project
+            scenario_results = None
+            try:
+                scenario_results = self.sharing_data.get("scenario_results")
+            except Exception:
+                pass
+            save_project(filepath, self.fleet, scenario_results)
+            messagebox.showinfo(
+                "Project Saved",
+                f"Project saved to:\n{filepath}",
+            )
+            self.status_bar.set(f"Project saved — {len(self.fleet.vehicles)} vehicles")
+        except Exception as exc:
+            logger.error("save_project_file error: %s", exc, exc_info=True)
+            messagebox.showerror("Save Failed", f"Could not save project:\n{exc}")
+
+    def open_project(self):
+        """Load a .fea project file, bypassing the VIN-processing pipeline."""
+        if self.fleet.vehicles:
+            if not messagebox.askyesno(
+                "Open Project",
+                "This will replace the current fleet. Continue?",
+            ):
+                return
+
+        filepath = filedialog.askopenfilename(
+            title="Open Project",
+            filetypes=[("Fleet Electrification Analyzer Project", "*.fea"),
+                       ("All Files", "*.*")],
+        )
+        if not filepath:
+            return
+
+        try:
+            from data.project_io import load_project
+            fleet, scenario_results = load_project(filepath)
+        except Exception as exc:
+            logger.error("open_project error: %s", exc, exc_info=True)
+            messagebox.showerror("Open Failed", f"Could not load project:\n{exc}")
+            return
+
+        # Install the fleet
+        self.fleet = fleet
+        self.results_data = list(fleet.vehicles)
+
+        self.results_panel.set_data(fleet.vehicles)
+        self.analysis_panel.set_fleet(fleet)
+        self.timeline_panel.set_fleet(
+            fleet,
+            on_year_changed=self._on_timeline_year_changed,
+            on_acf_changed=self._on_acf_override,
+        )
+        self.sharing_data.set("fleet", fleet)
+        self.present_panel.refresh_data()
+
+        # Restore scenario results if they were saved
+        if scenario_results is not None:
+            try:
+                self.sharing_data.set("scenario_results", scenario_results)
+                self.analysis_panel.scenario_results = scenario_results
+            except Exception as exc:
+                logger.warning("Could not restore scenario results: %s", exc)
+
+        self.update_vehicle_count()
+        self.notebook.select(1)  # jump to Results tab
+        self.status_bar.set(
+            f"Project loaded — {len(fleet.vehicles)} vehicles "
+            f"(fleet type: {fleet.fleet_type})"
+        )
+
     def copy_selection(self):
         """Copy the current selection to the clipboard."""
         current_tab = self.notebook.index(self.notebook.select())

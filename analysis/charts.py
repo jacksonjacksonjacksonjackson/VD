@@ -738,9 +738,9 @@ class FleetCharts:
 
         ax.set_xlabel("")
         ax.set_ylabel("Count")
-
-        # Rotate x-axis labels for readability
-        plt.xticks(rotation=45, ha='right')
+        ax.tick_params(axis='x', labelrotation=45)
+        for lbl in ax.get_xticklabels():
+            lbl.set_ha('right')
 
         # Insight
         top_make = make_names[0] if make_names else "N/A"
@@ -798,9 +798,9 @@ class FleetCharts:
 
         ax.set_xlabel("")
         ax.set_ylabel("Count")
-
-        # Rotate x-axis labels for readability
-        plt.xticks(rotation=45, ha='right')
+        ax.tick_params(axis='x', labelrotation=45)
+        for lbl in ax.get_xticklabels():
+            lbl.set_ha('right')
 
         top_model = model_names[0] if model_names else "N/A"
         subtitle = f"Top {min(len(model_names), 15)} models — {top_model} is most common ({counts[0]})"
@@ -1420,8 +1420,11 @@ class EmissionsCharts:
             )
             
             # Enhance text readability
-            plt.setp(autotexts, size=8, weight="bold")
-            plt.setp(texts, size=9)
+            for t in autotexts:
+                t.set_size(8)
+                t.set_weight("bold")
+            for t in texts:
+                t.set_size(9)
             
             # Add center text with total
             total_emissions = sum(sizes)

@@ -505,12 +505,12 @@ def _add_acf_electrification_chart(
 
     current_year = datetime.datetime.now().year
 
-    # Plain-English labels matching the user-built deck
+    # Plain-English labels for the ACF composition pie
     ACF_LABELS = {
-        "A": "Light Duty (Excluded)",
-        "B": "Medium or Heavy Duty",
-        "C": "Medium or Heavy Duty Potentially Exempted",
-        "D": "Emergency Vehicles (Excluded)",
+        "A": "Light Duty Vehicles (Excluded from ACF)",
+        "B": "Medium or Heavy-Duty Vehicles (Subject to ACF)",
+        "C": "Body-Type Exempt Vehicles (Excluded from ACF)",
+        "D": "Emergency Vehicles (Excluded from ACF)",
     }
     # Display order: B first (mandate-subject), then exempt categories
     ACF_ORDER = ["B", "A", "C", "D"]
@@ -612,10 +612,10 @@ def _add_purchase_schedule_chart(
         return False
 
     SERIES_DEFS = [
-        ("A", "Light Duty (Excluded from ACF Regulations)",           "#4472C4"),
-        ("B", "Medium or Heavy Duty",                                  SECONDARY_HEX_1),
-        ("C", "M/HD Vehicles Potentially Exempted from ACF",           "#FFC000"),
-        ("D", "Emergency Vehicles (Excluded from ACF Regulations)",    "#808080"),
+        ("A", "Light Duty Vehicles (Excluded from ACF)",               "#4472C4"),
+        ("B", "Medium or Heavy-Duty Vehicles (Subject to ACF)",        SECONDARY_HEX_1),
+        ("C", "Body-Type Exempt Vehicles (Excluded from ACF)",         "#FFC000"),
+        ("D", "Emergency Vehicles (Excluded from ACF)",                "#808080"),
     ]
 
     current_year = datetime.datetime.now().year
@@ -706,11 +706,11 @@ def _add_milestone_option_chart(
         return False
 
     SERIES_DEFS = [
-        ("A",       "Light Duty (Excluded from ACF Regulations)",         "#4472C4"),
-        ("B_GRP1",  "Milestone Group 1 (Class 2b\u20134)",                "#70AD47"),
-        ("B_GRP2",  "Milestone Group 2 (Class 5\u20138a/8b)",             "#375623"),
-        ("C",       "M/HD Vehicles Potentially Exempted from ACF",         "#FFC000"),
-        ("D",       "Emergency Vehicles (Excluded from ACF Regulations)", "#808080"),
+        ("A",       "Light Duty Vehicles (Excluded from ACF)",             "#4472C4"),
+        ("B_GRP1",  "M/HD Subject to ACF \u2014 Milestone Group 1 (Class 2b\u20134)",   "#70AD47"),
+        ("B_GRP2",  "M/HD Subject to ACF \u2014 Milestone Group 2 (Class 5\u20138a/8b)", "#375623"),
+        ("C",       "Body-Type Exempt Vehicles (Excluded from ACF)",       "#FFC000"),
+        ("D",       "Emergency Vehicles (Excluded from ACF)",              "#808080"),
     ]
 
     start_year = 2026

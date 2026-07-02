@@ -37,6 +37,8 @@ env/
 *.log
 *.sqlite
 *.db
+*.db-shm
+*.db-wal
 
 # Local development settings
 .env.local
@@ -59,5 +61,6 @@ coverage.xml
 data/raw/
 data/processed/
 data/exports/
+data/cache/
 outputs/
 temp/ 

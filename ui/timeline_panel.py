@@ -12,6 +12,7 @@ Provides:
 """
 
 import logging
+import warnings
 import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import Callable, Dict, List, Optional
@@ -56,15 +57,23 @@ _ACF_COL = "acf"           # column id for the ACF category cell
 _ACF_COL_NUM = 5           # 1-based column number ("#5") in the Treeview
 
 # Combobox options for ACF category inline edit: "CODE — Plain Label"
+# Dropdown options for the inline ACF editor — match ACF Category stored values exactly
 _ACF_OPTIONS = [
-    "ZEV — Already ZEV",
-    "A — Light-Duty (Exempt)",
-    "B — Mandate-Subject",
-    "C — Body-Type Exempt",
-    "D — Emergency Vehicle",
+    "Zero-Emission Vehicle",
+    "Exempt — Light-Duty",
+    "Subject to ACF",
+    "Exempt — Body Type",
+    "Emergency Vehicle",
 ]
+_ACF_OPTION_TO_CODE = {
+    "Zero-Emission Vehicle": "ZEV",
+    "Exempt — Light-Duty":   "A",
+    "Subject to ACF":        "B",
+    "Exempt — Body Type":    "C",
+    "Emergency Vehicle":     "D",
+}
 
-# Full plain-English labels used in the filter bar checkbuttons
+# Short labels used in the filter bar checkbuttons
 _ACF_FILTER_LABELS = {
     "ZEV": "Already ZEV",
     "A":   "Light-Duty (Exempt)",
@@ -201,8 +210,7 @@ class TimelinePanel(ttk.Frame):
                 command=self._apply_filter,
             )
             cb.pack(side=tk.LEFT, padx=(0, 6))
-            SimpleTooltip(cb,
-                f"Show/hide Category {cat} vehicles\n({_ACF_FILTER_LABELS[cat]})")
+            SimpleTooltip(cb, f"Show/hide {_ACF_FILTER_LABELS[cat]} vehicles")
 
         # ── EV year range ─────────────────────────────────────────────────────
         ttk.Label(inner, text="  EV Year:").pack(side=tk.LEFT, padx=(Spacing.SM, 3))
@@ -598,12 +606,8 @@ class TimelinePanel(ttk.Frame):
 
         self._cancel_edit()
 
-        current_code = self._tree.set(row_iid, _ACF_COL)
-        # Pre-select the matching option
-        current_option = next(
-            (opt for opt in _ACF_OPTIONS if opt.startswith(current_code + " ")),
-            _ACF_OPTIONS[0],
-        )
+        current_label = self._tree.set(row_iid, _ACF_COL)
+        current_option = current_label if current_label in _ACF_OPTIONS else _ACF_OPTIONS[0]
 
         combo = ttk.Combobox(
             self._tree,
@@ -670,16 +674,14 @@ class TimelinePanel(ttk.Frame):
     def _commit_acf(self, row_iid: str, vehicle: FleetVehicle, selected: str):
         """Validate and apply an ACF category override after dropdown selection.
 
-        ``selected`` is a string like "B — Mandate-Subject"; the code is
-        extracted by splitting on " — " and taking the first token.
+        ``selected`` is a full label string like "Subject to ACF".
         """
-        new_code = selected.split(" — ")[0].strip()
-        valid_codes = {"ZEV", "A", "B", "C", "D"}
-        if new_code not in valid_codes:
+        new_code = _ACF_OPTION_TO_CODE.get(selected)
+        if not new_code:
             logger.warning(f"Unrecognised ACF option selected: {selected!r}")
             return
 
-        old_code = vehicle.custom_fields.get("ACF Category", "")
+        old_code = vehicle.custom_fields.get("_acf_code", "")
         if new_code == old_code:
             return  # No change — nothing to do
 
@@ -772,7 +774,9 @@ class TimelinePanel(ttk.Frame):
                     max_v = 0
 
         _draw_gantt_chart(ax, vehicles, view, max_vehicles=max_v)
-        self._gantt_fig.tight_layout(pad=0.5)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            self._gantt_fig.tight_layout(pad=0.5)
         self._gantt_canvas.draw()
 
     # =========================================================================
