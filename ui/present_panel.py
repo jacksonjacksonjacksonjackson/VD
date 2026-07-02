@@ -170,8 +170,9 @@ class PresentPanel:
             "partner_1_name", "partner_1_title", "partner_1_org", "partner_1_email",
             "partner_2_name", "partner_2_title", "partner_2_org", "partner_2_email",
         ]}
-        # Default meeting date
-        self._pv["meeting_date"].set(datetime.datetime.now().strftime("%B %-d, %Y"))
+        # Default meeting date (cross-platform: %-d/%#d are non-portable strftime extensions)
+        _now = datetime.datetime.now()
+        self._pv["meeting_date"].set(f"{_now:%B} {_now.day}, {_now:%Y}")
         self._pv["presentation_type"].set("Kickoff")
 
         # Trace changes → mark dirty

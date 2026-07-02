@@ -6,7 +6,7 @@ Desktop Python/Tkinter app for fleet electrification consulting. Decodes vehicle
 
 **Stack:** Python 3.8+, Tkinter, pandas, requests, python-pptx, matplotlib, openpyxl, BeautifulSoup/Selenium
 **Entry point:** `python3 app.py` (GUI) or `python3 app.py -b -i in.csv -o out.csv` (batch)
-**Current version:** 3.0.11 on branch `uiux/v3_0_3`
+**Current version:** 3.0.11 on branch `main` (Excel report v2, Phases 1-9, merged to main; `uiux/v3_0_3` is now stale/behind)
 
 ---
 
@@ -287,7 +287,7 @@ Copy and paste this to start a new development session:
 
 ```
 I'm continuing development of my Fleet Electrification Analyzer app.
-Branch: uiux/v3_0_3 | Version: see settings.py APP_VERSION
+Branch: main | Version: see settings.py APP_VERSION
 Review CLAUDE.md fully before starting — it is the single source of truth.
 Run: python3 -m pytest tests/ -v (expect 279 passing)
 Focus this session: [DESCRIBE TASK]
